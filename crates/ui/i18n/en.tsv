@@ -5,11 +5,13 @@ auf dem Stand von {upstream}	up to date with {upstream}
 Branch {name}	Branch {name}
 Branch {name} (noch keine Commits)	Branch {name} (no commits yet)
 Dateityp geändert	file type changed
+Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
 gelöscht	deleted
 geändert	modified
 Git konnte nicht gestartet werden: {fehler}	Git could not be started: {fehler}
-Git verweigert {pfad}, weil der Ordner einem anderen Benutzer gehört. Wenn du ihm vertraust: git config --global --add safe.directory {pfad}	Git refuses {pfad} because the folder belongs to another user. If you trust it: git config --global --add safe.directory {pfad}
+Git verweigert {pfad}, weil der Ordner einem anderen Benutzer gehört. Wenn du ihm vertraust, trage ihn in Gits Einstellung safe.directory ein.	Git refuses {pfad} because the folder belongs to another user. If you trust it, add it to Git's safe.directory setting.
 Git wurde nicht gefunden. Installiere Git {min} oder neuer und starte GitCraft neu.	Git was not found. Install Git {min} or newer and restart GitCraft.
+git {befehl} brauchte länger als {sekunden} s und wurde beendet.	git {befehl} took longer than {sekunden} s and was stopped.
 git {befehl} ist fehlgeschlagen: {meldung}	git {befehl} failed: {meldung}
 git {befehl} lieferte zu viel Ausgabe (über {mib} MiB).	git {befehl} produced too much output (more than {mib} MiB).
 Git {version} ist zu alt; GitCraft braucht {min} oder neuer.	Git {version} is too old; GitCraft needs {min} or newer.

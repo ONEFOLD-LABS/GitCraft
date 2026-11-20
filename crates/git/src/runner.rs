@@ -3,6 +3,9 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::GitError;
 
@@ -13,14 +16,24 @@ pub const MIN_VERSION: GitVersion = GitVersion {
     patch: 0,
 };
 
-/// Largest stdout GitCraft reads from one git call.
-const MAX_STDOUT: usize = 256 * 1024 * 1024;
+/// Largest stdout GitCraft reads from one git call (larger results come in streams or pages).
+const MAX_STDOUT: usize = 64 * 1024 * 1024;
 /// Largest stderr kept for an error message.
 const MAX_STDERR: usize = 16 * 1024;
 
-/// Environment variables that would point git at another repository, index or object store
-/// than the one GitCraft opened; never inherited.
+/// How long one read may take before GitCraft stops it (a hung filesystem, a stuck process).
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Environment variables that would point git at another repository, index, object store or
+/// history, inject configuration, or write traces; never inherited.
 const REDIRECTING_ENV: &[&str] = &[
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_ATTR_SOURCE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -122,15 +135,33 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.read_with(cwd, &[], args)
+    }
+
+    /// Like [`GitRunner::read`], with configuration overrides (`key=value`, passed as `-c`)
+    /// placed before the command; [`crate::Repository`] uses them to neutralise programs its
+    /// configuration names.
+    pub fn read_with<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+    ) -> Result<Vec<u8>, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
         let command = args
             .first()
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut cmd = Command::new(&self.program);
-        cmd.current_dir(cwd)
-            .args(["-c", "core.fsmonitor=false"])
-            .args(&args)
+        cmd.current_dir(cwd).args(["-c", "core.fsmonitor=false"]);
+        for c in config {
+            cmd.arg("-c").arg(c);
+        }
+        cmd.args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -142,6 +173,15 @@ impl GitRunner {
             .env("LANGUAGE", "C");
         for key in REDIRECTING_ENV {
             cmd.env_remove(key);
+        }
+        for (key, _) in std::env::vars_os() {
+            let k = key.to_string_lossy();
+            if k.starts_with("GIT_CONFIG_KEY_")
+                || k.starts_with("GIT_CONFIG_VALUE_")
+                || k.starts_with("GIT_TRACE")
+            {
+                cmd.env_remove(&key);
+            }
         }
         for (k, v) in &self.env {
             cmd.env(k, v);
@@ -156,14 +196,60 @@ impl GitRunner {
             std::io::ErrorKind::NotFound => GitError::NotInstalled,
             _ => GitError::Spawn(e.to_string()),
         })?;
-        collect(child, &command, cwd)
+        collect(child, &command, cwd, READ_TIMEOUT)
     }
 }
 
 /// Reads stdout (capped) and stderr (capped, on its own thread so neither pipe can block git),
 /// waits for git and maps failures.
-fn collect(mut child: Child, command: &str, cwd: &Path) -> Result<Vec<u8>, GitError> {
-    let stderr_reader = child.stderr.take().map(|mut err| {
+fn collect(
+    mut child: Child,
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<Vec<u8>, GitError> {
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    // Watchdog: kills git when it takes longer than `timeout`; the main thread then sees the
+    // pipes close and reports the timeout.
+    let child = Arc::new(Mutex::new(child));
+    let (done, wait) = mpsc::channel::<()>();
+    let watched = Arc::clone(&child);
+    let watchdog = std::thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(timeout) {
+            if let Ok(mut c) = watched.lock() {
+                let _ = c.kill();
+            }
+            return true;
+        }
+        false
+    });
+    let result = collect_pipes(&child, stdout_pipe, stderr_pipe, command, cwd);
+    let _ = done.send(());
+    let timed_out = watchdog.join().unwrap_or(false);
+    if timed_out {
+        return Err(GitError::TimedOut {
+            command: command.to_owned(),
+            seconds: timeout.as_secs(),
+        });
+    }
+    result
+}
+
+fn collect_pipes(
+    child: &Mutex<Child>,
+    stdout_pipe: Option<std::process::ChildStdout>,
+    stderr_pipe: Option<std::process::ChildStderr>,
+    command: &str,
+    cwd: &Path,
+) -> Result<Vec<u8>, GitError> {
+    let kill = || {
+        if let Ok(mut c) = child.lock() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    };
+    let stderr_reader = stderr_pipe.map(|mut err| {
         std::thread::spawn(move || {
             let mut kept = Vec::new();
             let mut buf = [0u8; 4096];
@@ -180,21 +266,32 @@ fn collect(mut child: Child, command: &str, cwd: &Path) -> Result<Vec<u8>, GitEr
     });
     let mut stdout = Vec::new();
     let mut too_large = false;
-    if let Some(out) = child.stdout.take() {
+    if let Some(out) = stdout_pipe {
         let limit = u64::try_from(MAX_STDOUT)
             .unwrap_or(u64::MAX)
             .saturating_add(1);
         if let Err(e) = out.take(limit).read_to_end(&mut stdout) {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill();
             return Err(GitError::Spawn(e.to_string()));
         }
         too_large = stdout.len() > MAX_STDOUT;
     }
     if too_large {
-        let _ = child.kill();
+        kill();
     }
-    let status = child.wait().map_err(|e| GitError::Spawn(e.to_string()))?;
+    // Poll instead of `wait()`, so the watchdog can take the lock and kill a git that closed its
+    // output but does not end.
+    let status = loop {
+        let polled = child
+            .lock()
+            .map_err(|_| GitError::Spawn("git process lock poisoned".into()))?
+            .try_wait()
+            .map_err(|e| GitError::Spawn(e.to_string()))?;
+        if let Some(s) = polled {
+            break s;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let stderr = stderr_reader
         .and_then(|h| h.join().ok())
         .unwrap_or_default();
@@ -249,6 +346,22 @@ mod tests {
         assert_eq!(GitVersion::parse("hg version 6"), None);
         assert_eq!(GitVersion::parse("git version x.y"), None);
         assert!(v(2, 29, 9) < MIN_VERSION && v(2, 30, 0) >= MIN_VERSION);
+    }
+
+    /// A git that hangs is stopped after the timeout.
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_process_is_stopped() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let r = collect(child, "sleep", Path::new("."), Duration::from_millis(200));
+        assert!(matches!(r, Err(GitError::TimedOut { .. })), "{r:?}");
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

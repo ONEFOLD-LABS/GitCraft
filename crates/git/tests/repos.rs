@@ -324,6 +324,59 @@ fn repository_config_cannot_start_a_program_on_status() {
     assert!(marker.exists(), "plain git status should have run the hook");
 }
 
+/// A content filter from the repository's own configuration would run during `status` for
+/// every stat-dirty file (all files of an extracted archive). GitCraft switches such filters off.
+#[cfg(unix)]
+#[test]
+fn repository_filters_cannot_run_on_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.write("a.txt", "hello\n");
+    f.commit_all("base");
+    let marker = f.tmp.path().join("filter-ran");
+    let filter = f.tmp.path().join("filter.sh");
+    fs::write(
+        &filter,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    f.write(".gitattributes", "* filter=evil\n");
+    f.git(&["config", "filter.evil.clean", filter.to_str().unwrap()]);
+    f.git(&["config", "filter.evil.process", filter.to_str().unwrap()]);
+    // Make every tracked file stat-dirty, as after extracting an archive.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(f.repo().join("a.txt"))
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+
+    f.status();
+    assert!(
+        !marker.exists(),
+        "GitCraft must not run the repository's filter"
+    );
+
+    // The check is meaningful: plain git runs the filter.
+    f.git(&["status", "--porcelain"]);
+    assert!(
+        marker.exists(),
+        "plain git status should have run the filter"
+    );
+}
+
+#[test]
+fn filter_names_that_cannot_be_overridden_are_refused() {
+    let f = Fixture::new();
+    f.git(&["config", "filter.a=b.clean", "cat"]);
+    assert!(matches!(
+        Repository::open(&f.runner(), &f.repo()),
+        Err(GitError::UnsafeConfig(_))
+    ));
+}
+
 #[test]
 fn environment_cannot_redirect_git_to_another_repository() {
     let a = Fixture::new();
