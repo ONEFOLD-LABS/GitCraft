@@ -138,15 +138,13 @@ impl GitRunner {
         self.read_with(cwd, &[], args)
     }
 
-    /// Like [`GitRunner::read`], with configuration overrides (`key=value`, passed as `-c`)
-    /// placed before the command; [`crate::Repository`] uses them to neutralise programs its
-    /// configuration names.
-    pub fn read_with<I, S>(
+    /// Starts git with GitCraft's fixed setup; returns the child and the subcommand's name.
+    fn spawn<I, S>(
         &self,
         cwd: &Path,
         config: &[String],
         args: I,
-    ) -> Result<Vec<u8>, GitError>
+    ) -> Result<(Child, String), GitError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -196,7 +194,51 @@ impl GitRunner {
             std::io::ErrorKind::NotFound => GitError::NotInstalled,
             _ => GitError::Spawn(e.to_string()),
         })?;
+        Ok((child, command))
+    }
+
+    /// Like [`GitRunner::read`], with configuration overrides (`key=value`, passed as `-c`)
+    /// placed before the command; [`crate::Repository`] uses them to neutralise programs its
+    /// configuration names.
+    pub fn read_with<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+    ) -> Result<Vec<u8>, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let (child, command) = self.spawn(cwd, config, args)?;
         collect(child, &command, cwd, READ_TIMEOUT)
+    }
+
+    /// Starts a read whose output is consumed record by record ([`GitStream`]), e.g. a long
+    /// history. No timeout: the consumer sets the pace; dropping the stream stops git.
+    pub fn stream<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+    ) -> Result<GitStream, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let (mut child, command) = self.spawn(cwd, config, args)?;
+        let stdout = child.stdout.take().map(std::io::BufReader::new);
+        let stderr = child
+            .stderr
+            .take()
+            .map(|err| std::thread::spawn(move || drain(err)));
+        Ok(GitStream {
+            child,
+            stdout,
+            stderr,
+            command,
+            cwd: cwd.to_path_buf(),
+        })
     }
 }
 
@@ -249,21 +291,7 @@ fn collect_pipes(
             let _ = c.wait();
         }
     };
-    let stderr_reader = stderr_pipe.map(|mut err| {
-        std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            let mut buf = [0u8; 4096];
-            // Keep reading past the cap so that git never blocks on a full pipe.
-            while let Ok(n) = err.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                let room = MAX_STDERR.saturating_sub(kept.len());
-                kept.extend_from_slice(&buf[..n.min(room)]);
-            }
-            kept
-        })
-    });
+    let stderr_reader = stderr_pipe.map(|err| std::thread::spawn(move || drain(err)));
     let mut stdout = Vec::new();
     let mut too_large = false;
     if let Some(out) = stdout_pipe {
@@ -304,18 +332,106 @@ fn collect_pipes(
     if status.success() {
         return Ok(stdout);
     }
-    let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+    Err(failure(status.code(), &stderr, command, cwd))
+}
+
+/// Reads a pipe to its end, keeping at most [`MAX_STDERR`] bytes (reading on past the cap, so
+/// git never blocks on a full pipe).
+fn drain(mut pipe: impl Read) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = pipe.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        let room = MAX_STDERR.saturating_sub(kept.len());
+        kept.extend_from_slice(&buf[..n.min(room)]);
+    }
+    kept
+}
+
+/// The error for a git that exited unsuccessfully.
+fn failure(code: Option<i32>, stderr: &[u8], command: &str, cwd: &Path) -> GitError {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_owned();
     if stderr.contains("not a git repository") {
-        return Err(GitError::NotARepository(cwd.to_path_buf()));
+        return GitError::NotARepository(cwd.to_path_buf());
     }
     if stderr.contains("detected dubious ownership") {
-        return Err(GitError::DubiousOwnership(cwd.to_path_buf()));
+        return GitError::DubiousOwnership(cwd.to_path_buf());
     }
-    Err(GitError::Failed {
+    GitError::Failed {
         command: command.to_owned(),
-        code: status.code(),
+        code,
         stderr,
-    })
+    }
+}
+
+/// A running git whose stdout is read record by record. Dropping it stops git.
+pub struct GitStream {
+    child: Child,
+    stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
+    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    command: String,
+    cwd: PathBuf,
+}
+
+impl GitStream {
+    /// The next record up to `separator` (not included), or `None` at the end of the output.
+    /// A record longer than `max` bytes is an error (git is stopped).
+    pub fn next_record(&mut self, separator: u8, max: usize) -> Result<Option<Vec<u8>>, GitError> {
+        use std::io::BufRead;
+        let Some(out) = self.stdout.as_mut() else {
+            return Ok(None);
+        };
+        let mut record = Vec::new();
+        let limit = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+        let n = out
+            .by_ref()
+            .take(limit)
+            .read_until(separator, &mut record)
+            .map_err(|e| GitError::Spawn(e.to_string()))?;
+        if n == 0 {
+            self.stdout = None;
+            return Ok(None);
+        }
+        if record.last() == Some(&separator) {
+            record.pop();
+        } else if record.len() > max {
+            let _ = self.child.kill();
+            return Err(GitError::OutputTooLarge {
+                command: self.command.clone(),
+                limit: max,
+            });
+        }
+        Ok(Some(record))
+    }
+
+    /// Waits for git after the output has been read; reports a failed exit.
+    pub fn finish(mut self) -> Result<(), GitError> {
+        self.stdout = None;
+        let status = self
+            .child
+            .wait()
+            .map_err(|e| GitError::Spawn(e.to_string()))?;
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        if status.success() {
+            Ok(())
+        } else {
+            Err(failure(status.code(), &stderr, &self.command, &self.cwd))
+        }
+    }
+}
+
+impl Drop for GitStream {
+    fn drop(&mut self) {
+        // Unread output: git is no longer needed. After `finish` this is a no-op.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 #[cfg(test)]
