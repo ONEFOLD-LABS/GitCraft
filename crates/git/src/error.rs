@@ -29,6 +29,10 @@ pub enum GitError {
     },
     /// git wrote more output than GitCraft is willing to hold in memory.
     OutputTooLarge { command: String, limit: usize },
+    /// git took longer than GitCraft allows for the call and was stopped.
+    TimedOut { command: String, seconds: u64 },
+    /// The repository's configuration names a program in a way GitCraft cannot switch off.
+    UnsafeConfig(String),
     /// git's output did not have the expected form.
     Parse(String),
 }
@@ -62,6 +66,16 @@ impl fmt::Display for GitError {
                 f,
                 "git {command} produced more than {} MiB of output",
                 limit / (1024 * 1024)
+            ),
+            GitError::TimedOut { command, seconds } => {
+                write!(
+                    f,
+                    "git {command} took longer than {seconds} s and was stopped"
+                )
+            }
+            GitError::UnsafeConfig(key) => write!(
+                f,
+                "the repository configuration sets {key}, which GitCraft cannot switch off safely"
             ),
             GitError::Parse(e) => write!(f, "unexpected git output: {e}"),
         }
