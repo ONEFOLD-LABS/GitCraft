@@ -1,0 +1,15 @@
+name: Feature request
+description: Behaviour GitCraft should have
+labels: [enhancement]
+body:
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Desired behaviour
+      description: Describe how it should work from the user's point of view, in your own words (no screenshots or text copied from other products). Which Git commands does it correspond to?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is it useful?
