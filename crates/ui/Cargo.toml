@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 gitcraft-git.workspace = true
+gitcraft-graph.workspace = true
 egui = { version = "0.37", features = ["default_fonts", "monochrome_emoji_fonts"] }
 # Sprache des Systems (Einstellung „Wie das System“).
 sys-locale = "0.3"
