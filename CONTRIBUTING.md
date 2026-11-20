@@ -45,6 +45,22 @@ cargo xtask ci                                     # licences, fmt, clippy -D wa
 5. Open a pull request and fill in the template. Mention what you could not test.
 6. Address review feedback with new commits; the maintainer squashes or merges.
 
+## Planning
+
+- [docs/roadmap.md](docs/roadmap.md) lists the milestones; each GitHub milestone matches one
+  section, each bullet one or more issues.
+- [docs/architecture.md](docs/architecture.md) describes the layers and the internal API,
+  [docs/security.md](docs/security.md) the threat model and the checklist every pull request
+  follows, [docs/decisions/](docs/decisions/) the architecture decisions.
+- Labels: one `area: …` label for the part of the code, plus `security`, `robustness`,
+  `performance`, `accessibility`, `documentation` where they apply; `later` for work after 1.0.
+- An issue is done when the Definition of Done in [docs/spec.md](docs/spec.md#definition-of-done)
+  holds: happy path, error path, loading state, cancellation, keyboard, accessibility, platform
+  behaviour, logging, tests and documentation, and for destructive operations the safety
+  behaviour.
+- One issue, one branch, one pull request (`Fixes #n` in the description). Larger issues are
+  split into several pull requests that each leave `main` working.
+
 ## Reporting bugs
 
 Use the bug report template. Include the version (`gitcraft --version`), `git --version`,
