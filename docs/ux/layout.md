@@ -33,12 +33,14 @@ words; nothing is taken from other products (AGENTS.md, clean room).
 
 One row per commit, newest first, in graph (topological) order.
 
+Column titles sit above the rows and stay while they scroll; the author and hash columns are
+optional (settings).
+
 | Column | Content |
 |---|---|
-| Refs | Labels for the branches and tags pointing at the commit: local branches filled in their lane colour, remote branches outlined, tags with a tag shape, `HEAD` marked. Too many labels collapse into `+n` with a tooltip. Resizable. |
-| Graph | One lane per line of history, each in its own colour; commits as discs on their lane; merges and forks as curves. The commit at `HEAD` is drawn larger. |
+| Branch / Tag | Labels for the branches and tags pointing at the commit: local branches filled in their lane colour, remote branches outlined, tags as small boxes, the current branch outlined. A line in the lane colour joins the labels to the commit. Too many labels collapse into `+n`. |
+| Graph | One lane per line of history, each in its own colour; each commit as a disc on its lane with the author's initials (no images from the network); merge commits as small dots; lines between lanes as curves. The commit at `HEAD` is ringed. |
 | Message | Subject line; the rest of the message only in the details. |
-| Author | Initials in a disc (no images from the network), name on hover. |
 | Date | Relative ("2 h", "3 d"), absolute on hover; author or commit date, user's choice. |
 | Hash | Short id, optional column. |
 
@@ -97,9 +99,12 @@ upstream. Selecting an entry scrolls the history to its commit; double click che
 
 ## Toolbar
 
-Repository switcher, current branch (switch by typing), Undo, Pull (with mode: fetch only, fast
-forward, merge, rebase), Push, Branch, Stash, Pop, search, command palette. Buttons are disabled
-with a tooltip saying why (e.g. "Nothing to push").
+On the left the repository and the current branch, each as a small caption above its value
+(repository switcher and branch switch by typing follow). In the middle large buttons, an icon
+above a label: Undo, Redo, Pull (with mode: fetch only, fast forward, merge, rebase), Push,
+Branch, Stash, Pop. On the right open and refresh, search, command palette. Buttons are disabled
+with a tooltip saying why ("Nothing to push", or the version that brings the action). Icons are
+drawn as vectors with one stroke colour, as the brand asks.
 
 **Undo** reverts GitCraft's last local operation where Git keeps what is needed: checkout,
 commit (not yet pushed), branch create/delete, merge or rebase before push, discard (through
