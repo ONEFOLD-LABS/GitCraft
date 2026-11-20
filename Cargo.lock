@@ -1239,6 +1239,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitcraft-graph"
+version = "0.1.0"
+
+[[package]]
 name = "gitcraft-ui"
 version = "0.1.0"
 dependencies = [

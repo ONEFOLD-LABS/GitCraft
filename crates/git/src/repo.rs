@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use crate::log::{FORMAT, LogReader};
 use crate::path::bytes_to_path;
-use crate::{GitError, GitRunner, Status};
+use crate::refs::{REF_FORMAT, STASH_FORMAT};
+use crate::{GitError, GitRunner, Ref, Stash, Status};
 
 /// An opened Git working tree.
 #[derive(Debug, Clone)]
@@ -92,6 +94,68 @@ impl Repository {
             ],
         )?;
         Status::parse(&out)
+    }
+
+    /// Local branches, remote branches and tags, sorted by kind and name.
+    pub fn refs(&self) -> Result<Vec<Ref>, GitError> {
+        let out = self.runner.read_with(
+            &self.workdir,
+            &self.read_config,
+            [
+                "for-each-ref",
+                REF_FORMAT,
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ],
+        )?;
+        let mut refs = Ref::parse_list(&out)?;
+        refs.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+        Ok(refs)
+    }
+
+    /// The stash entries, newest first.
+    pub fn stashes(&self) -> Result<Vec<Stash>, GitError> {
+        let out = self.runner.read_with(
+            &self.workdir,
+            &self.read_config,
+            ["stash", "list", "-z", STASH_FORMAT],
+        )?;
+        Stash::parse_list(&out)
+    }
+
+    /// The history of all branches, remote branches and tags (and a detached HEAD) in graph
+    /// order, newest first, read in pages from one running `git log`. Empty for a repository
+    /// without commits.
+    pub fn log(&self) -> Result<LogReader, GitError> {
+        let head = match self.runner.read_with(
+            &self.workdir,
+            &self.read_config,
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+        ) {
+            Ok(_) => true,
+            Err(GitError::Failed { code: Some(1), .. }) => false,
+            Err(e) => return Err(e),
+        };
+        if !head && self.refs()?.is_empty() {
+            return Ok(LogReader::new(None));
+        }
+        let mut args = vec![
+            "log",
+            "-z",
+            "--topo-order",
+            "--no-color",
+            "--decorate=no",
+            FORMAT,
+            "--branches",
+            "--remotes",
+            "--tags",
+        ];
+        if head {
+            args.push("HEAD");
+        }
+        let stream = self.runner.stream(&self.workdir, &self.read_config, args)?;
+        Ok(LogReader::new(Some(stream)))
     }
 }
 
