@@ -1,0 +1,10 @@
+[package]
+name = "gitcraft-git"
+description = "Git-Schicht: ruft git auf, liest die Ausgabe in Domänentypen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
