@@ -1,9 +1,12 @@
 //! GitCraft's look: design tokens for dark and light, egui visuals built from them, and the
 //! choice between Dark, Light and System.
 //!
-//! Surfaces and the widget-state mapping follow StudioCraft's theme (`crates/ui/src/theme.rs`,
-//! MIT OR Apache-2.0, itself based on SoundCraft's theme, see NOTICE). GitCraft's accent is
-//! teal; the status colours (added, modified, deleted, renamed, conflict) are its own.
+//! Colours come from the ONEFOLD LABS brand (ONEFOLD-LABS/brand): surfaces, lines and text from
+//! `tokens/tokens.json` (`paper`, `surface`, `surface-sunken`, `line`, `ink`, `ink-muted`),
+//! GitCraft's accent `app-gitcraft` (brick) and the file-state colours from
+//! `apps/palette.json`, which `tools/make_app_icons.py` computes and contrast-checks. The two
+//! button fills of the dark theme and the error banner are derived here in the same way. The
+//! widget-state mapping follows StudioCraft's theme (MIT OR Apache-2.0, see NOTICE).
 //!
 //! Use: call [`install`] once at start-up, read colours with [`tokens`] wherever the UI paints.
 
@@ -11,10 +14,6 @@ use egui::{Color32, Context, CornerRadius, Stroke, Theme, ThemePreference, Visua
 
 const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
-}
-
-const fn rgba(hex: u32, alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied_const((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
 
 /// Every colour the GitCraft UI paints with.
@@ -54,57 +53,57 @@ pub struct Tokens {
 
 impl Tokens {
     pub const DARK: Tokens = Tokens {
-        window_bg: rgb(0x1e1e1e),
-        panel_bg: rgb(0x2a2a2a),
-        panel_bg2: rgb(0x323232),
-        toolbar_bg: rgb(0x242424),
-        border: rgb(0x121212),
-        border_light: rgb(0x454545),
-        row_alt: rgb(0x2f2f2f),
-        text: rgb(0xd8d8d8),
-        text_strong: rgb(0xf4f4f4),
-        text_dim: rgb(0x9a9a9a),
-        text_on_accent: rgb(0xffffff),
-        accent: rgb(0x2f9e8f),
-        accent_dark: rgb(0x1f6f65),
-        button: rgb(0x3c3c3c),
-        button_hi: rgb(0x4e4e4e),
-        selection: rgba(0x2f9e8f, 77),
-        added: rgb(0x6cc070),
-        modified: rgb(0xd9b44a),
-        deleted: rgb(0xe57c77),
-        renamed: rgb(0x6aa8e8),
-        conflict: rgb(0xff7a45),
-        untracked: rgb(0xa8a8a8),
-        error_bg: rgb(0x4a2424),
-        error_text: rgb(0xffc2ba),
+        window_bg: rgb(0x0b0e10),
+        panel_bg: rgb(0x171d20),
+        panel_bg2: rgb(0x171d20),
+        toolbar_bg: rgb(0x101416),
+        border: rgb(0x3a454a),
+        border_light: rgb(0x9aa8ae),
+        row_alt: rgb(0x101416),
+        text: rgb(0xeef2f1),
+        text_strong: rgb(0xeef2f1),
+        text_dim: rgb(0x9aa8ae),
+        text_on_accent: rgb(0x08181b),
+        accent: rgb(0xea7a4f),
+        accent_dark: rgb(0xff9972),
+        button: rgb(0x252d30),
+        button_hi: rgb(0x333c40),
+        selection: rgb(0x472215),
+        added: rgb(0x49964e),
+        modified: rgb(0xae7c02),
+        deleted: rgb(0xce6862),
+        renamed: rgb(0x328bcd),
+        conflict: rgb(0xc86d41),
+        untracked: rgb(0x868686),
+        error_bg: rgb(0x47211d),
+        error_text: rgb(0xfebfb7),
     };
 
     pub const LIGHT: Tokens = Tokens {
-        window_bg: rgb(0xbcbcbc),
-        panel_bg: rgb(0xcfcfcf),
-        panel_bg2: rgb(0xdadada),
-        toolbar_bg: rgb(0xc5c5c5),
-        border: rgb(0x6a6a6a),
-        border_light: rgb(0xa0a0a0),
-        row_alt: rgb(0xc8c8c8),
-        text: rgb(0x1a1a1a),
-        text_strong: rgb(0x000000),
-        text_dim: rgb(0x484848),
+        window_bg: rgb(0xeceeeb),
+        panel_bg: rgb(0xffffff),
+        panel_bg2: rgb(0xffffff),
+        toolbar_bg: rgb(0xf6f7f5),
+        border: rgb(0xc9d0cf),
+        border_light: rgb(0x56636a),
+        row_alt: rgb(0xf6f7f5),
+        text: rgb(0x111719),
+        text_strong: rgb(0x111719),
+        text_dim: rgb(0x56636a),
         text_on_accent: rgb(0xffffff),
-        accent: rgb(0x1f7a6e),
-        accent_dark: rgb(0x175c53),
-        button: rgb(0xdddddd),
-        button_hi: rgb(0xcbcbcb),
-        selection: rgba(0x1f7a6e, 51),
-        added: rgb(0x175c22),
-        modified: rgb(0x684d00),
-        deleted: rgb(0x98261f),
-        renamed: rgb(0x1d5195),
-        conflict: rgb(0x912f0b),
-        untracked: rgb(0x4a4a4a),
-        error_bg: rgb(0xf0cfca),
-        error_text: rgb(0x6e1a12),
+        accent: rgb(0xc4501d),
+        accent_dark: rgb(0xa53b03),
+        button: rgb(0xeceeeb),
+        button_hi: rgb(0xc9d0cf),
+        selection: rgb(0xfee1d6),
+        added: rgb(0x2b7932),
+        modified: rgb(0x8c6306),
+        deleted: rgb(0xad4b47),
+        renamed: rgb(0x066fb0),
+        conflict: rgb(0xa95023),
+        untracked: rgb(0x6a6a6a),
+        error_bg: rgb(0xfee0dc),
+        error_text: rgb(0x822c27),
     };
 
     pub const fn of(theme: Theme) -> &'static Tokens {
@@ -147,6 +146,8 @@ impl Tokens {
             w.fg_stroke = Stroke::new(w.fg_stroke.width, fg);
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
+        // Brand book: borders of buttons and inputs in `ink-muted`, at least 3:1.
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, self.border_light);
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, self.accent);
         v.widgets.active.bg_stroke = Stroke::new(1.0, self.accent_dark);
         v
@@ -208,6 +209,10 @@ mod tests {
             }
             assert!(contrast(t.error_text, t.error_bg) >= 4.5);
             assert!(contrast(t.text_on_accent, t.accent) >= 3.0);
+            assert!(
+                contrast(t.border_light, t.panel_bg) >= 3.0,
+                "control borders"
+            );
         }
     }
 
