@@ -293,3 +293,37 @@ fn texts_behind_variables_are_translated() {
     i18n::set_language(i18n::Language::German);
     assert!(missing.is_empty(), "missing in i18n/en.tsv: {missing:?}");
 }
+
+/// Names from the repository or a remote reach the window escaped, like file names.
+#[test]
+fn ref_names_paths_and_git_messages_are_escaped() {
+    let head = head_text(&Head::Branch {
+        name: "main\u{202e}txt".into(),
+        commit: None,
+    });
+    assert!(head.contains("main\\u{202e}txt"), "{head}");
+    let status = Status {
+        head: Head::Branch {
+            name: "main".into(),
+            commit: None,
+        },
+        upstream: Some(gitcraft_git::Upstream {
+            name: "origin/x\u{200b}y".into(),
+            ahead_behind: None,
+        }),
+        files: Vec::new(),
+    };
+    assert!(upstream_text(&status).contains("x\\u{200b}y"));
+    let err = error_text(&GitError::Failed {
+        command: "status".into(),
+        code: Some(128),
+        stderr: "bad ref\nline\u{202e}2".into(),
+    });
+    assert!(err.contains("bad ref\\nline\\u{202e}2"), "{err}");
+    let err = error_text(&GitError::NotARepository(PathBuf::from("/tmp/a\u{202e}b")));
+    assert!(err.contains("a\\u{202e}b"), "{err}");
+    assert_eq!(
+        repo_name(Path::new("/x/repo\u{2066}name")),
+        "repo\\u{2066}name"
+    );
+}

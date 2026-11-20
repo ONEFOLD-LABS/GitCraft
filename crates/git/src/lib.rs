@@ -6,12 +6,14 @@
 //!   configuration cannot start programs for reads).
 //! - [`Repository`] is an opened working tree; [`Repository::status`] reads its [`Status`].
 
+mod display;
 mod error;
 mod path;
 mod repo;
 mod runner;
 mod status;
 
+pub use display::{escape, escape_bytes};
 pub use error::GitError;
 pub use path::RepoPath;
 pub use repo::Repository;

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_git::{
     Change, Conflict, FileChange, GitError, GitRunner, GitVersion, Head, MIN_VERSION, Repository,
-    Status,
+    Status, escape,
 };
 
 use crate::i18n::{tr, trf};
@@ -255,7 +255,7 @@ impl RepoWindow {
             if let Some(busy) = &self.busy {
                 ui.add(egui::Spinner::new());
                 let text = match busy {
-                    Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &p.display())]),
+                    Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
                     Busy::Refreshing => tr("Lese Status …").to_owned(),
                 };
                 ui.label(RichText::new(text).color(theme::tokens(&ctx).text_dim));
@@ -285,10 +285,8 @@ impl RepoWindow {
                     .size(16.0),
             );
             ui.add(
-                egui::Label::new(
-                    RichText::new(repo.workdir().display().to_string()).color(t.text_dim),
-                )
-                .truncate(),
+                egui::Label::new(RichText::new(shown_path(repo.workdir())).color(t.text_dim))
+                    .truncate(),
             );
         });
         ui.horizontal(|ui| {
@@ -431,8 +429,13 @@ fn shortcut_hint(ctx: &egui::Context, text: &str, shortcut: &KeyboardShortcut) -
 fn repo_name(workdir: &Path) -> String {
     workdir
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| workdir.display().to_string())
+        .map(|n| escape(&n.to_string_lossy()))
+        .unwrap_or_else(|| shown_path(workdir))
+}
+
+/// A path for display: escaped like file names (control, invisible and direction characters).
+fn shown_path(path: &Path) -> String {
+    escape(&path.to_string_lossy())
 }
 
 fn head_text(head: &Head) -> String {
@@ -440,10 +443,11 @@ fn head_text(head: &Head) -> String {
         Head::Branch {
             name,
             commit: Some(_),
-        } => trf("Branch {name}", &[("name", name)]),
-        Head::Branch { name, commit: None } => {
-            trf("Branch {name} (noch keine Commits)", &[("name", name)])
-        }
+        } => trf("Branch {name}", &[("name", &escape(name))]),
+        Head::Branch { name, commit: None } => trf(
+            "Branch {name} (noch keine Commits)",
+            &[("name", &escape(name))],
+        ),
         Head::Detached { commit } => trf(
             "Losgelöster HEAD bei {commit}",
             &[("commit", &commit.short())],
@@ -455,18 +459,19 @@ fn upstream_text(status: &Status) -> String {
     let Some(up) = &status.upstream else {
         return tr("kein Upstream").to_owned();
     };
+    let name = escape(&up.name);
     match up.ahead_behind {
         None => trf(
             "Upstream {upstream} existiert nicht mehr",
-            &[("upstream", &up.name)],
+            &[("upstream", &name)],
         ),
-        Some((0, 0)) => trf("auf dem Stand von {upstream}", &[("upstream", &up.name)]),
+        Some((0, 0)) => trf("auf dem Stand von {upstream}", &[("upstream", &name)]),
         Some((ahead, behind)) => trf(
             "{voraus} voraus, {zurueck} zurück gegenüber {upstream}",
             &[
                 ("voraus", &ahead),
                 ("zurueck", &behind),
-                ("upstream", &up.name),
+                ("upstream", &name),
             ],
         ),
     }
@@ -566,22 +571,23 @@ fn error_text(e: &GitError) -> String {
             "Git {version} ist zu alt; GitCraft braucht {min} oder neuer.",
             &[("version", v), ("min", &MIN_VERSION)],
         ),
-        GitError::NotARepository(p) => {
-            trf("{pfad} ist kein Git-Repository.", &[("pfad", &p.display())])
-        }
+        GitError::NotARepository(p) => trf(
+            "{pfad} ist kein Git-Repository.",
+            &[("pfad", &shown_path(p))],
+        ),
         GitError::Bare(p) => trf(
             "{pfad} ist ein Bare-Repository ohne Arbeitsverzeichnis; das wird noch nicht unterstützt.",
-            &[("pfad", &p.display())],
+            &[("pfad", &shown_path(p))],
         ),
         GitError::DubiousOwnership(p) => trf(
-            "Git verweigert {pfad}, weil der Ordner einem anderen Benutzer gehört. Wenn du ihm vertraust: git config --global --add safe.directory {pfad}",
-            &[("pfad", &p.display())],
+            "Git verweigert {pfad}, weil der Ordner einem anderen Benutzer gehört. Wenn du ihm vertraust, trage ihn in Gits Einstellung safe.directory ein.",
+            &[("pfad", &shown_path(p))],
         ),
         GitError::Failed {
             command, stderr, ..
         } => trf(
             "git {befehl} ist fehlgeschlagen: {meldung}",
-            &[("befehl", command), ("meldung", stderr)],
+            &[("befehl", command), ("meldung", &escape(stderr))],
         ),
         GitError::OutputTooLarge { command, limit } => trf(
             "git {befehl} lieferte zu viel Ausgabe (über {mib} MiB).",
@@ -590,6 +596,14 @@ fn error_text(e: &GitError) -> String {
         GitError::Spawn(err) => trf(
             "Git konnte nicht gestartet werden: {fehler}",
             &[("fehler", err)],
+        ),
+        GitError::TimedOut { command, seconds } => trf(
+            "git {befehl} brauchte länger als {sekunden} s und wurde beendet.",
+            &[("befehl", command), ("sekunden", seconds)],
+        ),
+        GitError::UnsafeConfig(key) => trf(
+            "Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.",
+            &[("schluessel", &escape(key))],
         ),
         GitError::Parse(err) => trf("Unerwartete Ausgabe von git: {fehler}", &[("fehler", err)]),
     }
