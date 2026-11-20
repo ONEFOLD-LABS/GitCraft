@@ -6,6 +6,7 @@ Arbeitsstand: {geaendert} geändert, {vorgemerkt} vorgemerkt	Work in progress: {
 Arbeitsverzeichnis und Index entsprechen dem letzten Commit.	Working tree and index match the last commit.
 auf dem Stand von {upstream}	up to date with {upstream}
 Autor	Author
+Autorenbilder von Gravatar laden	Load author images from Gravatar
 Branch	Branch
 Branch / Tag	Branch / tag
 Branch {name}	Branch {name}
@@ -17,9 +18,13 @@ Commit-Nachricht	Commit message
 Committer	Committer
 Dateityp geändert	file type changed
 Datum	Date
+Die Einstellungen konnten nicht gespeichert werden: {fehler}	The settings could not be saved: {fehler}
+Die Einstellungen waren nicht lesbar und wurden zurückgesetzt ({fehler}); die alte Datei liegt als settings.json.bak daneben.	The settings could not be read and were reset ({fehler}); the old file is kept next to them as settings.json.bak.
 Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
+Einstellungen	Settings
 Eltern	Parents
 Filtern	Filter
+Für jede Autorin und jeden Autor geht ein Hash der E-Mail-Adresse an gravatar.com. Daran ist erkennbar, welche Personen in deinen Repositories vorkommen, auch in privaten. Bilder werden eine Woche lokal zwischengespeichert. Ohne diese Einstellung zeigt GitCraft Initialen und nimmt keine Verbindung auf.	For every author, a hash of their e-mail address is sent to gravatar.com. It shows which people appear in your repositories, private ones included. Images are cached locally for a week. Without this setting GitCraft shows initials and makes no connection.
 gelöscht	deleted
 geändert	modified
 Git konnte nicht gestartet werden: {fehler}	Git could not be started: {fehler}

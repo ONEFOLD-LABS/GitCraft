@@ -5,8 +5,10 @@
 //! the bottom. Git runs on worker threads ([`worker`], [`history`]); the window never waits for
 //! it.
 
+mod avatars;
 mod history;
 pub mod i18n;
+pub mod settings;
 mod sidebar;
 pub mod theme;
 mod toolbar;
@@ -20,8 +22,10 @@ use gitcraft_git::{
     Repository, Status, escape,
 };
 
+use crate::avatars::Avatars;
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
+use crate::settings::{Loaded, Settings};
 use crate::sidebar::Sidebar;
 use crate::worker::{Job, Outcome, Snapshot, Worker};
 
@@ -73,6 +77,11 @@ pub struct RepoWindow {
     history: History,
     selection: Selection,
     sidebar: Sidebar,
+    settings: Settings,
+    /// Where the settings are saved; `None` keeps them in memory (tests).
+    settings_dir: Option<PathBuf>,
+    show_settings: bool,
+    avatars: Avatars,
     error: Option<String>,
     busy: Option<Busy>,
     git_version: Option<GitVersion>,
@@ -97,6 +106,10 @@ impl RepoWindow {
             history: History::empty(),
             selection: Selection::None,
             sidebar: Sidebar::default(),
+            settings: Settings::default(),
+            settings_dir: None,
+            show_settings: false,
+            avatars: Avatars::off(),
             error: None,
             busy: None,
             git_version: None,
@@ -105,6 +118,41 @@ impl RepoWindow {
             pending_open: initial,
             version_requested: false,
             was_focused: true,
+        }
+    }
+
+    /// Loads the settings from `dir` and saves changes there.
+    pub fn use_settings(&mut self, dir: Option<PathBuf>) {
+        if let Some(dir) = &dir {
+            let (settings, loaded) = Settings::load(dir);
+            if let Loaded::Broken(e) = loaded {
+                self.error = Some(trf(
+                    "Die Einstellungen waren nicht lesbar und wurden zurückgesetzt ({fehler}); die alte Datei liegt als settings.json.bak daneben.",
+                    &[("fehler", &escape(&e))],
+                ));
+            }
+            self.settings = settings;
+        }
+        self.settings_dir = dir;
+        self.apply_settings();
+    }
+
+    fn apply_settings(&mut self) {
+        self.avatars = if self.settings.avatars {
+            Avatars::on(settings::cache_dir().map(|d| d.join("avatars")))
+        } else {
+            Avatars::off()
+        };
+    }
+
+    fn save_settings(&mut self) {
+        if let Some(dir) = &self.settings_dir
+            && let Err(e) = self.settings.save(dir)
+        {
+            self.error = Some(trf(
+                "Die Einstellungen konnten nicht gespeichert werden: {fehler}",
+                &[("fehler", &escape(&e))],
+            ));
         }
     }
 
@@ -242,8 +290,10 @@ impl RepoWindow {
             self.open(path, &ctx);
         }
         self.collect(&ctx);
+        self.avatars.poll(&ctx);
         self.handle_input(&ctx);
         let t = theme::tokens(&ctx);
+        self.settings_window(&ctx);
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
         if let Some(error) = &self.error {
@@ -408,6 +458,9 @@ impl RepoWindow {
                 if refresh.clicked() {
                     self.refresh(&ctx);
                 }
+                if ui.button(tr("Einstellungen")).clicked() {
+                    self.show_settings = !self.show_settings;
+                }
                 let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
                     &ctx,
                     tr("Repository öffnen"),
@@ -426,6 +479,37 @@ impl RepoWindow {
                 }
             });
         });
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        let mut changed = false;
+        egui::Window::new(tr("Einstellungen"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 90.0])
+            .show(ctx, |ui| {
+                let t = theme::tokens(ui.ctx());
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.avatars,
+                        tr("Autorenbilder von Gravatar laden"),
+                    )
+                    .changed();
+                ui.label(
+                    RichText::new(tr(
+                        "Für jede Autorin und jeden Autor geht ein Hash der E-Mail-Adresse an gravatar.com. Daran ist erkennbar, welche Personen in deinen Repositories vorkommen, auch in privaten. Bilder werden eine Woche lokal zwischengespeichert. Ohne diese Einstellung zeigt GitCraft Initialen und nimmt keine Verbindung auf.",
+                    ))
+                    .color(t.text_dim),
+                );
+            });
+        self.show_settings = open;
+        if changed {
+            self.apply_settings();
+            self.save_settings();
+        }
     }
 
     fn status_line(&mut self, ui: &mut egui::Ui) {
@@ -487,6 +571,7 @@ impl RepoWindow {
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
         let view = View {
             labels: &self.labels,
+            avatars: &self.avatars,
             wip,
             head: head.as_ref(),
             now,

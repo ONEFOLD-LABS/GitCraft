@@ -241,6 +241,7 @@ pub(crate) struct WipCounts {
 /// Everything the history view needs besides the history itself.
 pub(crate) struct View<'a> {
     pub labels: &'a Labels,
+    pub avatars: &'a crate::avatars::Avatars,
     pub wip: Option<WipCounts>,
     pub head: Option<&'a Oid>,
     pub now: i64,
@@ -466,6 +467,12 @@ impl History {
         if commit.parents.len() > 1 {
             // Merge commits as small dots, so the commits with content stand out.
             node.circle_filled(c, 4.5, color);
+        } else if let Some(tex) = view.avatars.get(ui.ctx(), &commit.author.email) {
+            let disc = Rect::from_center_size(c, vec2(NODE_R * 2.0, NODE_R * 2.0));
+            egui::Image::from_texture((tex, disc.size()))
+                .corner_radius(NODE_R)
+                .paint_at(ui, disc);
+            node.circle_stroke(c, NODE_R, Stroke::new(2.0, color));
         } else {
             node.circle_filled(c, NODE_R, color);
             node.text(
