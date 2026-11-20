@@ -1,0 +1,50 @@
+# Englische Texte der Oberfläche: deutsch<TAB>englisch.
+Aktualisieren	Refresh
+Arbeitsverzeichnis und Index entsprechen dem letzten Commit.	Working tree and index match the last commit.
+auf dem Stand von {upstream}	up to date with {upstream}
+Branch {name}	Branch {name}
+Branch {name} (noch keine Commits)	Branch {name} (no commits yet)
+Dateityp geändert	file type changed
+gelöscht	deleted
+geändert	modified
+Git konnte nicht gestartet werden: {fehler}	Git could not be started: {fehler}
+Git verweigert {pfad}, weil der Ordner einem anderen Benutzer gehört. Wenn du ihm vertraust: git config --global --add safe.directory {pfad}	Git refuses {pfad} because the folder belongs to another user. If you trust it: git config --global --add safe.directory {pfad}
+Git wurde nicht gefunden. Installiere Git {min} oder neuer und starte GitCraft neu.	Git was not found. Install Git {min} or newer and restart GitCraft.
+git {befehl} ist fehlgeschlagen: {meldung}	git {befehl} failed: {meldung}
+git {befehl} lieferte zu viel Ausgabe (über {mib} MiB).	git {befehl} produced too much output (more than {mib} MiB).
+Git {version} ist zu alt; GitCraft braucht {min} oder neuer.	Git {version} is too old; GitCraft needs {min} or newer.
+hinzugefügt	added
+Kein Repository geöffnet	No repository open
+kein Upstream	no upstream
+Keine Änderungen	No changes
+Konflikt: beide gelöscht	conflict: both deleted
+Konflikt: beide geändert	conflict: both modified
+Konflikt: beide hinzugefügt	conflict: both added
+Konflikt: von ihnen gelöscht	conflict: deleted by them
+Konflikt: von ihnen hinzugefügt	conflict: added by them
+Konflikt: von uns gelöscht	conflict: deleted by us
+Konflikt: von uns hinzugefügt	conflict: added by us
+Konflikte	Conflicts
+Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}	Conflicts {konflikte} · Staged {vorgemerkt} · Modified {geaendert} · Untracked {neu}
+kopiert	copied
+Leeres Repository	Empty repository
+Lese Status …	Reading status …
+Losgelöster HEAD bei {commit}	Detached HEAD at {commit}
+Nicht vorgemerkt	Not staged
+Noch keine Commits und keine Dateien.	No commits and no files yet.
+Repository öffnen	Open repository
+Repository öffnen …	Open repository …
+Status neu lesen	Read the status again
+umbenannt	renamed
+Unerwartete Ausgabe von git: {fehler}	Unexpected output from git: {fehler}
+Unversioniert	Untracked
+unversioniert	untracked
+Upstream {upstream} existiert nicht mehr	Upstream {upstream} no longer exists
+Vorgemerkt	Staged
+Wie das System	Like the system
+{pfad} ist ein Bare-Repository ohne Arbeitsverzeichnis; das wird noch nicht unterstützt.	{pfad} is a bare repository without a working tree; this is not supported yet.
+{pfad} ist kein Git-Repository.	{pfad} is not a Git repository.
+{voraus} voraus, {zurueck} zurück gegenüber {upstream}	{voraus} ahead, {zurueck} behind {upstream}
+Öffne einen Ordner mit einem Git-Repository oder ziehe ihn in dieses Fenster.	Open a folder with a Git repository or drag it into this window.
+Öffne {pfad} …	Opening {pfad} …
+Öffnen …	Open …
