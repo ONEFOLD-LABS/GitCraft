@@ -37,4 +37,4 @@ operations:
 
 - One place to test ordering, cancellation and error handling.
 - The UI becomes a pure view of snapshots and events.
-- The worker in `crates/ui/src/worker.rs` moves into core when it is introduced (roadmap 0.2).
+- The worker in `crates/ui/src/worker.rs` moves into core when it is introduced (roadmap 0.3).

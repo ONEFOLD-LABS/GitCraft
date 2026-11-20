@@ -12,8 +12,8 @@ release for everyday use is **1.0**, after polish (0.8) and release work (0.9).
 | Milestone | Goal |
 |---|---|
 | 0.1 – Foundation and status | A real repository opens and shows its status; project infrastructure in place |
-| 0.2 – Changes and commit | Review, stage, discard and commit without leaving GitCraft |
-| 0.3 – History | Fast, lazy commit graph with details, diffs and search |
+| 0.2 – Layout and history | The main window: history graph in the centre, sidebar, commit details with diffs |
+| 0.3 – Changes and commit | Review, stage, discard and commit at the work-in-progress row |
 | 0.4 – Branches, tags and stash | Everyday branch work |
 | 0.5 – Remotes and authentication | Clone, fetch, pull, push, safely authenticated |
 | 0.6 – Merge, rebase and conflicts | Integrate work and resolve conflicts (MVP scope complete) |
@@ -35,37 +35,42 @@ release for everyday use is **1.0**, after polish (0.8) and release work (0.9).
 - About dialog with version, git version and third-party licences
 - Logging with redaction
 
-## 0.2 – Changes and commit
+## 0.2 – Layout and history
+
+The main window as described in [ux/layout.md](ux/layout.md); read-only.
+
+- Main window layout: toolbar, sidebar, history, details, status line
+- Streaming log reader in pages
+- Commit graph layout (lanes, stable colours)
+- History view: refs column, graph, message, author, date; work-in-progress row
+- Sidebar: branches, remote branches, tags, stashes, worktrees
+- Diff parser (unified, binary, renames, modes, submodules)
+- Commit details and commit diff (merge commits); diff viewer, unified, virtualised
+- Context menus on commits and ref labels (entries appear as their milestones land)
+- Search (message, author, hash, path, content)
+- File history
+- Parser fuzzing; performance targets for large repositories
+
+## 0.3 – Changes and commit
 
 - Application layer `crates/core`: RepoSession, operation queue, events (ADR-006)
 - Command log: every git command GitCraft ran, copyable
 - Safe arguments (`--end-of-options`, pathspec from stdin) and checked paths
 - Repository trust for program-running configuration
-- Diff parser (unified, binary, renames, modes, submodules)
-- Diff viewer, unified, virtualised, with large-diff guard
+- Staging and committing in the details panel at the work-in-progress row
 - Stage and unstage files; hunks; single lines
 - Discard changes (files, hunks) with recovery; delete untracked files
 - Commit: message editor, identity check, hooks, signing as configured
 - Amend the last commit (warns when already pushed)
 
-## 0.3 – History
-
-- Streaming log reader in pages
-- Commit graph layout (lanes)
-- History view with refs, virtualised
-- Commit details and commit diff (merge commits)
-- Search (message, author, hash, path, content)
-- File history
-- Parser fuzzing; performance targets for large repositories
-
 ## 0.4 – Branches, tags and stash
 
-- Sidebar: branches, remote branches, tags, stashes, worktrees
 - Branches: create, checkout (with local changes), rename, delete
 - Checkout of a commit (detached HEAD) with explanation
 - Compare branches
 - Tags: list, create, delete, push
 - Stash: create, list, show, apply, pop, drop
+- Undo the last local operation (toolbar)
 
 ## 0.5 – Remotes and authentication
 
@@ -83,6 +88,7 @@ release for everyday use is **1.0**, after polish (0.8) and release work (0.9).
 - Cherry-pick and revert
 - Operation-in-progress bar (continue, skip, abort with consequences)
 - Conflict view: ours, theirs, base; take per hunk; mark resolved
+- Drag a branch onto another to merge, rebase or fast-forward
 
 ## 0.7 – Worktrees
 

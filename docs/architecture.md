@@ -31,7 +31,7 @@ Rules:
 
 `crates/core` does not exist yet: the first milestone lets the UI call `crates/git` through a
 small worker (`crates/ui/src/worker.rs`). It is introduced before the first write operation
-(roadmap 0.2), and the worker moves there.
+(roadmap 0.3), and the worker moves there.
 
 ## crates/git – the Git layer
 
@@ -74,7 +74,7 @@ invisible characters. Turning a `RepoPath` into a file-system path for a destruc
 goes through one checked function that rejects absolute paths, `..` components and paths that
 leave the working tree through a symlink.
 
-## crates/core – the application layer (planned, roadmap 0.2)
+## crates/core – the application layer (planned, roadmap 0.3)
 
 ### RepoSession
 
@@ -130,6 +130,7 @@ watcher (debounced) and window focus trigger refreshes; history pages are loaded
 
 ## crates/ui – views
 
+The main window's layout and operation are specified in [ux/layout.md](ux/layout.md).
 View modules (`status`, `diff`, `history`, `sidebar`, `commit`, `dialogs`, `palette`) render
 from the snapshot and send `Command`s. Conventions from AGENTS.md: theme tokens, `tr()`,
 virtualised lists, accessible labels, render tests with screenshots.
