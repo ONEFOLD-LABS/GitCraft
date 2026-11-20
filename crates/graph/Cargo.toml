@@ -1,0 +1,7 @@
+[package]
+name = "gitcraft-graph"
+description = "Layout des Commit-Graphen: Spuren, Farben und Liniensegmente je Zeile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true

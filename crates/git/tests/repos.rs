@@ -425,3 +425,129 @@ fn redirect_child() {
         .unwrap();
     assert!(s.is_clean(), "status came from the GIT_DIR repository");
 }
+
+#[test]
+fn log_of_a_fresh_repository_is_empty() {
+    let f = Fixture::new();
+    let mut log = f.open().log().unwrap();
+    assert!(log.next_page(10).unwrap().is_empty());
+    assert!(log.is_done());
+}
+
+#[test]
+fn log_reads_pages_newest_first_with_merges() {
+    let f = Fixture::new();
+    for i in 0..5 {
+        f.write("a.txt", &i.to_string());
+        f.commit_all(&format!("c{i}"));
+    }
+    f.git(&["checkout", "-q", "-b", "side", "HEAD~2"]);
+    f.write("b.txt", "side");
+    f.commit_all("on side");
+    f.git(&["checkout", "-q", "main"]);
+    f.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+
+    let mut log = f.open().log().unwrap();
+    let mut all = Vec::new();
+    loop {
+        let page = log.next_page(2).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 2);
+        all.extend(page);
+    }
+    assert!(log.is_done());
+    assert_eq!(all.len(), 7);
+    assert_eq!(all[0].subject, "merge side");
+    assert_eq!(all[0].parents.len(), 2);
+    assert_eq!(all.last().unwrap().subject, "c0");
+    assert!(all.last().unwrap().parents.is_empty());
+    // Topological order: every commit comes before its parents.
+    for (i, c) in all.iter().enumerate() {
+        for p in &c.parents {
+            let at = all.iter().position(|x| &x.id == p).unwrap();
+            assert!(at > i, "{} before its parent", c.subject);
+        }
+    }
+}
+
+#[test]
+fn dropping_a_log_halfway_stops_git() {
+    let f = Fixture::new();
+    for i in 0..30 {
+        f.write("a.txt", &i.to_string());
+        f.commit_all(&format!("c{i}"));
+    }
+    let mut log = f.open().log().unwrap();
+    assert_eq!(log.next_page(3).unwrap().len(), 3);
+    drop(log); // must return promptly, not wait for the rest
+}
+
+#[test]
+fn refs_and_stashes() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("base");
+    f.git(&["tag", "-a", "v1", "-m", "release"]);
+    f.git(&["tag", "light"]);
+    f.git(&["branch", "feature"]);
+    // A remote: a bare clone, fetched back as origin.
+    let bare = f.tmp.path().join("origin.git");
+    let out = f
+        .command(f.tmp.path())
+        .args(["clone", "-q", "--bare"])
+        .arg(f.repo())
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    f.git(&["remote", "add", "origin", bare.to_str().unwrap()]);
+    f.git(&["fetch", "-q", "origin"]);
+    f.git(&["branch", "-q", "--set-upstream-to", "origin/main"]);
+    f.write("a.txt", "2");
+    f.commit_all("ahead");
+    f.write("a.txt", "dirty");
+    f.git(&["stash", "push", "-q", "-m", "parked"]);
+
+    let repo = f.open();
+    let refs = repo.refs().unwrap();
+    let names: Vec<(gitcraft_git::RefKind, &str)> =
+        refs.iter().map(|r| (r.kind, r.name.as_str())).collect();
+    use gitcraft_git::RefKind::*;
+    assert_eq!(
+        names,
+        [
+            (Local, "feature"),
+            (Local, "main"),
+            (Remote, "origin/feature"),
+            (Remote, "origin/main"),
+            (Tag, "light"),
+            (Tag, "v1"),
+        ]
+    );
+    let main = refs.iter().find(|r| r.name == "main").unwrap();
+    assert!(main.is_head);
+    assert_eq!(main.upstream.as_deref(), Some("origin/main"));
+    assert_eq!(
+        main.tracking,
+        Some(gitcraft_git::Tracking::AheadBehind(1, 0))
+    );
+    let v1 = refs.iter().find(|r| r.name == "v1").unwrap();
+    let light = refs.iter().find(|r| r.name == "light").unwrap();
+    assert_eq!(
+        v1.target, light.target,
+        "annotated tag peeled to its commit"
+    );
+
+    let stashes = repo.stashes().unwrap();
+    assert_eq!(stashes.len(), 1);
+    assert_eq!(stashes[0].selector, "stash@{0}");
+    assert!(stashes[0].message.contains("parked"));
+
+    // The log covers the remote branches and tags too, but not the stash commits.
+    let mut log = repo.log().unwrap();
+    let all = log.next_page(100).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(!all.iter().any(|c| c.id == stashes[0].id));
+}
