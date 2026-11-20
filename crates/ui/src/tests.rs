@@ -407,3 +407,29 @@ fn history_with_branches_labels_and_keyboard() {
     w.select_commit(head);
     shot("history-commit-dark", ThemePreference::Dark, w);
 }
+
+/// The settings window explains what the avatar switch sends; switching it saves the file and
+/// turns the avatar loader on (the test never reaches the network: nothing is drawn while on).
+#[test]
+fn avatar_setting_is_saved_and_explained() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("eins");
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    assert!(!w.settings.avatars, "off by default");
+    w.show_settings = true;
+    shot("settings-dark", ThemePreference::Dark, w);
+
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    w.settings.avatars = true;
+    w.apply_settings();
+    w.save_settings();
+    let (saved, _) = crate::settings::Settings::load(dir.path());
+    assert!(saved.avatars);
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    assert!(w.settings.avatars, "loaded again");
+}
