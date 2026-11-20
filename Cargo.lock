@@ -1249,6 +1249,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "gitcraft-git",
+ "gitcraft-graph",
  "image",
  "rfd",
  "sys-locale",
