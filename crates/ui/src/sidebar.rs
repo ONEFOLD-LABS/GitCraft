@@ -45,7 +45,7 @@ impl Sidebar {
                         .iter()
                         .filter(|r| r.kind == kind && matches(&r.name))
                         .collect();
-                    let heading = format!("{} {}", tr(title), items.len());
+                    let heading = format!("{}  {}", tr(title).to_uppercase(), items.len());
                     egui::CollapsingHeader::new(RichText::new(heading).color(t.text_strong))
                         .id_salt(title)
                         .default_open(open)
@@ -58,7 +58,7 @@ impl Sidebar {
                         });
                 }
                 let stashes: Vec<&Stash> = stashes.iter().filter(|s| matches(&s.message)).collect();
-                let heading = format!("{} {}", tr("Stashes"), stashes.len());
+                let heading = format!("{}  {}", tr("Stashes").to_uppercase(), stashes.len());
                 egui::CollapsingHeader::new(RichText::new(heading).color(t.text_strong))
                     .id_salt("Stashes")
                     .default_open(false)

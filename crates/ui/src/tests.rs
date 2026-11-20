@@ -298,6 +298,7 @@ fn texts_behind_variables_are_translated() {
         "Remote",
         "Tags",
     ];
+    texts.extend(toolbar::ACTIONS.map(|(_, label, _)| label));
     texts.extend(
         [
             C::BothModified,

@@ -9,6 +9,7 @@ mod history;
 pub mod i18n;
 mod sidebar;
 pub mod theme;
+mod toolbar;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -379,42 +380,51 @@ impl RepoWindow {
         let ctx = ui.ctx().clone();
         let t = theme::tokens(&ctx);
         ui.horizontal(|ui| {
-            let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
-                &ctx,
-                tr("Repository öffnen"),
-                &OPEN,
-            ));
-            if open.clicked() {
-                self.pick_folder(&ctx);
-            }
-            let refresh = ui
-                .add_enabled(
-                    self.repo.is_some() && !self.is_busy(),
-                    egui::Button::new(tr("Aktualisieren")),
-                )
-                .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
-            if refresh.clicked() {
-                self.refresh(&ctx);
-            }
-            ui.separator();
             if let (Some(repo), Some(status)) = (&self.repo, self.status()) {
-                ui.label(
-                    RichText::new(repo_name(repo.workdir()))
-                        .color(t.text_strong)
-                        .size(15.0),
-                )
-                .on_hover_text(shown_path(repo.workdir()));
-                ui.label(head_text(&status.head));
-                ui.label(RichText::new(upstream_text(status)).color(t.text_dim));
+                toolbar::caption(
+                    ui,
+                    t,
+                    tr("Repository"),
+                    &repo_name(repo.workdir()),
+                    &shown_path(repo.workdir()),
+                );
+                toolbar::caption(
+                    ui,
+                    t,
+                    tr("Branch"),
+                    &branch_name(&status.head),
+                    &format!("{} · {}", head_text(&status.head), upstream_text(status)),
+                );
+                ui.separator();
             }
-            if let Some(busy) = &self.busy {
-                ui.add(egui::Spinner::new());
-                let text = match busy {
-                    Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
-                    Busy::Refreshing => tr("Lese Status …").to_owned(),
-                };
-                ui.label(RichText::new(text).color(t.text_dim));
-            }
+            toolbar::coming(ui, t);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refresh = ui
+                    .add_enabled(
+                        self.repo.is_some() && !self.is_busy(),
+                        egui::Button::new(tr("Aktualisieren")),
+                    )
+                    .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
+                if refresh.clicked() {
+                    self.refresh(&ctx);
+                }
+                let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
+                    &ctx,
+                    tr("Repository öffnen"),
+                    &OPEN,
+                ));
+                if open.clicked() {
+                    self.pick_folder(&ctx);
+                }
+                if let Some(busy) = &self.busy {
+                    let text = match busy {
+                        Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
+                        Busy::Refreshing => tr("Lese Status …").to_owned(),
+                    };
+                    ui.label(RichText::new(text).color(t.text_dim));
+                    ui.add(egui::Spinner::new());
+                }
+            });
         });
     }
 
@@ -618,6 +628,14 @@ impl RepoWindow {
                 self.pick_folder(&ctx);
             }
         });
+    }
+}
+
+/// The branch name for the toolbar, or `HEAD 1a2b3c4` when detached.
+fn branch_name(head: &Head) -> String {
+    match head {
+        Head::Branch { name, .. } => escape(name),
+        Head::Detached { commit } => format!("HEAD {}", commit.short()),
     }
 }
 

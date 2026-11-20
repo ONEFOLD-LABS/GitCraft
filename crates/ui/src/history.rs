@@ -18,11 +18,14 @@ use crate::theme::Tokens;
 pub(crate) const PAGE: usize = 2000;
 /// Height of one history row.
 pub(crate) const ROW_H: f32 = 28.0;
-const LANE_W: f32 = 16.0;
+const LANE_W: f32 = 24.0;
+/// Radius of a commit's author disc on the graph.
+const NODE_R: f32 = 9.5;
+/// Height of the column header above the rows.
+const HEADER_H: f32 = 22.0;
 /// Lanes drawn at most; wider histories are cut at the right edge of the graph column.
 const MAX_LANES: usize = 24;
 const REFS_W: f32 = 170.0;
-const AUTHOR_W: f32 = 28.0;
 const DATE_W: f32 = 76.0;
 
 /// Reads pages of the log on its own thread, one page per request. Dropping it ends the thread
@@ -293,6 +296,7 @@ impl History {
         let total = self.display_rows(wip);
         let head_row = view.head.and_then(|h| self.position(h));
         let graph_w = (self.width.clamp(1, MAX_LANES) as f32) * LANE_W + 8.0;
+        paint_header(ui, t, graph_w);
         let mut area = egui::ScrollArea::vertical()
             .id_salt("history")
             .auto_shrink([false, false]);
@@ -379,7 +383,7 @@ impl History {
         let stroke = Stroke::new(2.0, t.text_dim);
         if head_row == Some(0) {
             p.extend(Shape::dashed_line(
-                &[pos2(c.x, c.y + 7.0), pos2(c.x, cols.rect.bottom())],
+                &[pos2(c.x, c.y + NODE_R + 1.0), pos2(c.x, cols.rect.bottom())],
                 stroke,
                 3.0,
                 3.0,
@@ -388,7 +392,7 @@ impl History {
         let ring: Vec<Pos2> = (0..=24)
             .map(|k| {
                 let a = k as f32 / 24.0 * std::f32::consts::TAU;
-                c + vec2(a.cos(), a.sin()) * 6.0
+                c + vec2(a.cos(), a.sin()) * NODE_R
             })
             .collect();
         p.extend(Shape::dashed_line(&ring, stroke, 2.5, 2.0));
@@ -443,23 +447,38 @@ impl History {
         let c = cols.lane_center(row.lane);
         if below_wip {
             graph.extend(Shape::dashed_line(
-                &[pos2(c.x, cols.rect.top()), pos2(c.x, c.y - 7.0)],
+                &[pos2(c.x, cols.rect.top()), pos2(c.x, c.y - NODE_R - 1.0)],
                 Stroke::new(2.0, t.text_dim),
                 3.0,
                 3.0,
             ));
         }
         let color = lane_color(row.color);
-        if head_row == Some(i) {
-            graph.circle_filled(c, 6.0, color);
-            graph.circle_stroke(c, 8.5, Stroke::new(1.5, t.text_strong));
-        } else {
-            graph.circle_filled(c, 5.0, color);
-        }
-
-        // Refs column.
         let labels = view.labels.of(&commit.id);
-        paint_labels(ui, t, cols.refs, labels, color);
+        // Refs column, joined to the node by a line in the lane colour.
+        if let Some(end) = paint_labels(ui, t, cols.refs, labels, color) {
+            p.with_clip_rect(cols.rect).line_segment(
+                [pos2(end + 2.0, mid), pos2(c.x - NODE_R, mid)],
+                Stroke::new(1.5, color),
+            );
+        }
+        let node = p.with_clip_rect(cols.graph.expand2(vec2(0.0, 2.0)));
+        if commit.parents.len() > 1 {
+            // Merge commits as small dots, so the commits with content stand out.
+            node.circle_filled(c, 4.5, color);
+        } else {
+            node.circle_filled(c, NODE_R, color);
+            node.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                initials(&commit.author.name),
+                FontId::proportional(9.5),
+                t.on_lane,
+            );
+        }
+        if head_row == Some(i) {
+            node.circle_stroke(c, NODE_R + 3.0, Stroke::new(1.5, t.text_strong));
+        }
 
         // Message, author, date.
         let subject = escape(&commit.subject);
@@ -469,20 +488,6 @@ impl History {
             &subject,
             FontId::proportional(14.0),
             t.text,
-        );
-        let initials = initials(&commit.author.name);
-        let disc = cols.author.center();
-        p.circle_filled(
-            disc,
-            11.0,
-            t.lanes[hash(&commit.author.email) % t.lanes.len()],
-        );
-        p.text(
-            disc,
-            egui::Align2::CENTER_CENTER,
-            &initials,
-            FontId::proportional(10.5),
-            t.on_lane,
         );
         let date = relative_date(view.now, commit.author.time);
         p.text(
@@ -507,7 +512,6 @@ struct Columns {
     refs: Rect,
     graph: Rect,
     message: Rect,
-    author: Rect,
     date: Rect,
 }
 
@@ -520,23 +524,15 @@ impl Columns {
             pos2(rect.right() - DATE_W - 8.0, rect.top()),
             pos2(rect.right() - 8.0, rect.bottom()),
         );
-        let author = Rect::from_min_size(
-            pos2(date.left() - AUTHOR_W - 8.0, rect.top()),
-            vec2(AUTHOR_W, rect.height()),
-        );
         let message = Rect::from_min_max(
             pos2(graph.right() + 4.0, rect.top()),
-            pos2(
-                (author.left() - 8.0).max(graph.right() + 4.0),
-                rect.bottom(),
-            ),
+            pos2((date.left() - 8.0).max(graph.right() + 4.0), rect.bottom()),
         );
         Columns {
             rect,
             refs,
             graph,
             message,
-            author,
             date,
         }
     }
@@ -569,7 +565,17 @@ fn line(p: &egui::Painter, x0: f32, y0: f32, x1: f32, y1: f32, color: Color32) {
 
 /// Pills for the refs on a commit: local branches filled in the lane colour, remote branches
 /// outlined, tags as small boxes; what does not fit becomes `+n`.
-fn paint_labels(ui: &egui::Ui, t: &Tokens, area: Rect, labels: &[Label], color: Color32) {
+/// Returns where the last drawn label ends, for the line to the node.
+fn paint_labels(
+    ui: &egui::Ui,
+    t: &Tokens,
+    area: Rect,
+    labels: &[Label],
+    color: Color32,
+) -> Option<f32> {
+    if labels.is_empty() {
+        return None;
+    }
     let p = ui.painter().with_clip_rect(area);
     let font = FontId::proportional(12.0);
     let mut x = area.left() + 6.0;
@@ -585,14 +591,14 @@ fn paint_labels(ui: &egui::Ui, t: &Tokens, area: Rect, labels: &[Label], color: 
         let reserve = if rest > 1 { 28.0 } else { 0.0 };
         if x + w > area.right() - 6.0 - reserve {
             let more = format!("+{rest}");
-            p.text(
+            let r = p.text(
                 pos2(x, y),
                 egui::Align2::LEFT_CENTER,
                 more,
                 font,
                 t.text_dim,
             );
-            break;
+            return Some(r.right());
         }
         let pill = Rect::from_min_size(pos2(x, y - 9.0), vec2(w, 18.0));
         match l.kind {
@@ -623,6 +629,42 @@ fn paint_labels(ui: &egui::Ui, t: &Tokens, area: Rect, labels: &[Label], color: 
         p.galley(pos2(x + 6.0, y - galley.size().y / 2.0), galley, text_color);
         x += w + 4.0;
     }
+    Some(x - 4.0)
+}
+
+/// Column titles above the rows (they stay while the rows scroll).
+fn paint_header(ui: &mut egui::Ui, t: &Tokens, graph_w: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
+    let cols = Columns::new(rect, graph_w);
+    let p = ui.painter();
+    p.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, t.border),
+    );
+    let font = FontId::proportional(11.5);
+    for (area, text, align) in [
+        (cols.refs, tr("Branch / Tag"), egui::Align2::LEFT_CENTER),
+        (cols.graph, tr("Graph"), egui::Align2::LEFT_CENTER),
+        (
+            cols.message,
+            tr("Commit-Nachricht"),
+            egui::Align2::LEFT_CENTER,
+        ),
+        (cols.date, tr("Datum"), egui::Align2::RIGHT_CENTER),
+    ] {
+        let x = if align == egui::Align2::RIGHT_CENTER {
+            area.right()
+        } else {
+            area.left() + 6.0
+        };
+        p.with_clip_rect(area).text(
+            pos2(x, area.center().y),
+            align,
+            text.to_uppercase(),
+            font.clone(),
+            t.text_dim,
+        );
+    }
 }
 
 fn wip_text(c: WipCounts) -> String {
@@ -650,11 +692,6 @@ pub(crate) fn initials(name: &str) -> String {
     } else {
         letters
     }
-}
-
-fn hash(s: &str) -> usize {
-    s.bytes()
-        .fold(5381usize, |h, b| h.wrapping_mul(33) ^ usize::from(b))
 }
 
 /// "jetzt", "5 Min.", "3 Std.", "2 Tg.", "4 Mon.", "2 J." (and the English forms).

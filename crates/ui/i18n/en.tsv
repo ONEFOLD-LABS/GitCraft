@@ -6,13 +6,17 @@ Arbeitsstand: {geaendert} geändert, {vorgemerkt} vorgemerkt	Work in progress: {
 Arbeitsverzeichnis und Index entsprechen dem letzten Commit.	Working tree and index match the last commit.
 auf dem Stand von {upstream}	up to date with {upstream}
 Autor	Author
+Branch	Branch
+Branch / Tag	Branch / tag
 Branch {name}	Branch {name}
 Branch {name} (noch keine Commits)	Branch {name} (no commits yet)
 Branches, Tags und Stashes filtern	Filter branches, tags and stashes
 Commit	Commit
 Commit-ID kopieren	Copy commit ID
+Commit-Nachricht	Commit message
 Committer	Committer
 Dateityp geändert	file type changed
+Datum	Date
 Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
 Eltern	Parents
 Filtern	Filter
@@ -25,12 +29,14 @@ git {befehl} brauchte länger als {sekunden} s und wurde beendet.	git {befehl} t
 git {befehl} ist fehlgeschlagen: {meldung}	git {befehl} failed: {meldung}
 git {befehl} lieferte zu viel Ausgabe (über {mib} MiB).	git {befehl} produced too much output (more than {mib} MiB).
 Git {version} ist zu alt; GitCraft braucht {min} oder neuer.	Git {version} is too old; GitCraft needs {min} or newer.
+Graph	Graph
 hinzugefügt	added
 jetzt	now
 Kein Repository geöffnet	No repository open
 kein Upstream	no upstream
 keine (erster Commit)	none (first commit)
 Keine Änderungen	No changes
+Kommt mit Version {v}	Comes with version {v}
 Konflikt: beide gelöscht	conflict: both deleted
 Konflikt: beide geändert	conflict: both modified
 Konflikt: beide hinzugefügt	conflict: both added
@@ -50,9 +56,15 @@ Nachricht kopieren	Copy message
 Nicht vorgemerkt	Not staged
 Nichts ausgewählt	Nothing selected
 Noch keine Commits und keine Dateien.	No commits and no files yet.
+Pop	Pop
+Pull	Pull
+Push	Push
 Remote	Remote
+Repository	Repository
 Repository öffnen	Open repository
 Repository öffnen …	Open repository …
+Rückgängig	Undo
+Stash	Stash
 Stashes	Stashes
 Status neu lesen	Read the status again
 Tags	Tags
@@ -64,6 +76,7 @@ Upstream weg	upstream gone
 Upstream {upstream} existiert nicht mehr	Upstream {upstream} no longer exists
 Vorgemerkt	Staged
 Wie das System	Like the system
+Wiederholen	Redo
 {name}: Upstream {upstream} existiert nicht mehr	{name}: upstream {upstream} no longer exists
 {name}: {voraus} voraus, {zurueck} zurück gegenüber {upstream}	{name}: {voraus} ahead, {zurueck} behind {upstream}
 {n} Commits	{n} commits
