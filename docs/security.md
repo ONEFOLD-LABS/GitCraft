@@ -109,7 +109,9 @@ drop, force push, worktree removal with changes:
 
 Logs (and the command log in the UI) contain git arguments, durations and exit codes, with URLs
 redacted and without file contents, commit messages or prompt answers. No network access
-except what the user starts (fetch, pull, push, clone) and the opt-in update check (ADR-004, planned for 0.9).
+except what the user starts (fetch, pull, push, clone), the opt-in author images (ADR-005
+amendment: e-mail hashes to gravatar.com, off by default) and the opt-in update check (ADR-004,
+planned for 0.9).
 
 ### Supply chain
 
