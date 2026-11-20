@@ -34,8 +34,12 @@ Rules:
 - Hooks run only where Git runs them (commit, merge, rebase, push, checkout); GitCraft shows
   that hooks exist and shows their output. Skipping them (`--no-verify`) is an explicit choice.
 
-Residual risk: clean/smudge filters can run during `status` when the index is not up to date;
-the trust prompt above names them.
+- Content filters (`filter.<driver>.clean/smudge/process`) defined in the repository's local
+  or worktree configuration are switched off for every read (`-c filter.<d>.clean=` and so on),
+  because `status` runs a clean filter for every stat-dirty file, which is every file of a
+  freshly extracted archive. Driver names that `-c` cannot address (containing `=`) make
+  GitCraft refuse the repository. Filters from global or system configuration stay active.
+  Tested with a planted filter (#86).
 
 ### T2 – Argument injection
 
@@ -49,13 +53,17 @@ use. Tests try names like `--upload-pack=touch x` and `-rf`.
 
 ### T3 – Environment and redirection
 
-Variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_EXTERNAL_DIFF` are never
-inherited (tested). `GIT_TERMINAL_PROMPT=0`: git cannot block on a terminal prompt.
+Variables that redirect git or inject configuration are never inherited: `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE`, object directories, `GIT_EXTERNAL_DIFF`, `GIT_CONFIG`,
+`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, `GIT_ATTR_SOURCE`,
+`GIT_REPLACE_REF_BASE`, `GIT_GRAFT_FILE`, `GIT_SHALLOW_FILE`, `GIT_TRACE*` (tested for
+`GIT_DIR`). Reads are stopped after 300 s. `GIT_TERMINAL_PROMPT=0`: git cannot block on a terminal prompt.
 
 ### T4 – Paths and file names
 
 File names are bytes and may contain newlines, control, zero-width and direction characters.
-Display escapes them (tested: `invoice\u{202e}txt.exe` does not read as `invoiceexe.txt`).
+Display escapes them, invalid bytes as `\xNN` (tested: `invoice\u{202e}txt.exe` does not read as
+`invoiceexe.txt`). The same applies to ref names, remote names, paths and git's messages.
 Destructive file operations (discard, delete untracked) resolve paths through one checked
 function: no absolute paths, no `..`, nothing outside the working tree, symlinks are removed
 as links and never followed.
