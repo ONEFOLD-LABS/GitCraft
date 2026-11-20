@@ -296,7 +296,8 @@ impl History {
         let wip = view.wip.is_some();
         let total = self.display_rows(wip);
         let head_row = view.head.and_then(|h| self.position(h));
-        let graph_w = (self.width.clamp(1, MAX_LANES) as f32) * LANE_W + 8.0;
+        // At least wide enough for the column title.
+        let graph_w = ((self.width.clamp(1, MAX_LANES) as f32) * LANE_W + 8.0).max(64.0);
         paint_header(ui, t, graph_w);
         let mut area = egui::ScrollArea::vertical()
             .id_salt("history")

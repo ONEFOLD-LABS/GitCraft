@@ -6,6 +6,7 @@
 //! it.
 
 mod avatars;
+mod diffview;
 mod history;
 pub mod i18n;
 pub mod settings;
@@ -18,16 +19,17 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_git::{
-    Change, Conflict, FileChange, GitError, GitRunner, GitVersion, Head, MIN_VERSION, Oid,
-    Repository, Status, escape,
+    Change, ChangedFile, Conflict, FileChange, FileStatus, GitError, GitRunner, GitVersion, Head,
+    MIN_VERSION, Oid, Repository, Status, escape,
 };
 
 use crate::avatars::Avatars;
+use crate::diffview::Prepared;
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
 use crate::settings::{Loaded, Settings};
 use crate::sidebar::Sidebar;
-use crate::worker::{Job, Outcome, Snapshot, Worker};
+use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
@@ -57,7 +59,29 @@ enum Row {
         /// What the letter means, for the tooltip and screen readers.
         meaning: &'static str,
         path: String,
+        /// The diff a click opens (none for conflicts until the conflict view exists).
+        diff: Option<DiffKey>,
     },
+}
+
+/// Generation tag of detail jobs (commit details, diffs); they are matched by what they
+/// belong to, not by generation.
+const DETAIL_JOB: u64 = u64::MAX - 1;
+
+/// Message and files of the selected commit (loading while `None`).
+struct Details {
+    id: Oid,
+    message: Option<String>,
+    files: Option<Vec<ChangedFile>>,
+    error: Option<String>,
+}
+
+/// The diff shown in the centre.
+struct DiffState {
+    key: DiffKey,
+    title: String,
+    prepared: Option<Prepared>,
+    error: Option<String>,
 }
 
 /// What is running right now (shown next to the spinner).
@@ -76,6 +100,8 @@ pub struct RepoWindow {
     labels: Labels,
     history: History,
     selection: Selection,
+    details: Option<Details>,
+    diff: Option<DiffState>,
     sidebar: Sidebar,
     settings: Settings,
     /// Where the settings are saved; `None` keeps them in memory (tests).
@@ -105,6 +131,8 @@ impl RepoWindow {
             labels: Labels::default(),
             history: History::empty(),
             selection: Selection::None,
+            details: None,
+            diff: None,
             sidebar: Sidebar::default(),
             settings: Settings::default(),
             settings_dir: None,
@@ -209,6 +237,8 @@ impl RepoWindow {
         self.history = History::start(&repo, ctx);
         self.repo = Some(repo);
         self.selection = Selection::None;
+        self.details = None;
+        self.diff = None;
         self.apply(snapshot);
     }
 
@@ -221,6 +251,13 @@ impl RepoWindow {
             self.history = History::start(repo, ctx);
         }
         self.apply(snapshot);
+        // A diff of the working tree may have changed with it.
+        if let Some(state) = &self.diff
+            && !matches!(state.key, DiffKey::Commit { .. })
+        {
+            let (key, title) = (state.key.clone(), state.title.clone());
+            self.open_diff(key, title, ctx);
+        }
     }
 
     fn apply(&mut self, snapshot: Snapshot) {
@@ -239,10 +276,34 @@ impl RepoWindow {
 
     fn collect(&mut self, ctx: &egui::Context) {
         for (generation, outcome) in self.worker.poll() {
-            if let Outcome::Version(v) = outcome {
-                self.git_version = Some(v);
-                continue;
-            }
+            let outcome = match outcome {
+                Outcome::Version(v) => {
+                    self.git_version = Some(v);
+                    continue;
+                }
+                Outcome::CommitDetails { id, result } => {
+                    if let Some(d) = self.details.as_mut().filter(|d| d.id == id) {
+                        match result {
+                            Ok((message, files)) => {
+                                d.message = Some(message);
+                                d.files = Some(files);
+                            }
+                            Err(e) => d.error = Some(error_text(&e)),
+                        }
+                    }
+                    continue;
+                }
+                Outcome::Diff { key, result } => {
+                    if let Some(s) = self.diff.as_mut().filter(|s| s.key == key) {
+                        match result {
+                            Ok(diff) => s.prepared = Some(Prepared::new(s.title.clone(), &diff)),
+                            Err(e) => s.error = Some(error_text(&e)),
+                        }
+                    }
+                    continue;
+                }
+                other => other,
+            };
             if generation != self.generation {
                 continue;
             }
@@ -254,7 +315,7 @@ impl RepoWindow {
                 }
                 Outcome::Refreshed(snapshot) => self.refreshed(*snapshot, ctx),
                 Outcome::Failed(e) => self.error = Some(error_text(&e)),
-                Outcome::Version(_) => {}
+                Outcome::Version(_) | Outcome::CommitDetails { .. } | Outcome::Diff { .. } => {}
             }
         }
         self.history.poll();
@@ -338,11 +399,101 @@ impl RepoWindow {
             .default_size(340.0)
             .min_size(220.0)
             .show(ui, |ui| self.details(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.history_view(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.diff.is_some() {
+                self.diff_view(ui);
+            } else {
+                self.history_view(ui);
+            }
+        });
+        self.ensure_details(&ctx);
+    }
+
+    /// Starts loading message and files of the selected commit when they are not there yet.
+    fn ensure_details(&mut self, ctx: &egui::Context) {
+        let Selection::Commit(id) = &self.selection else {
+            return;
+        };
+        if self.details.as_ref().is_some_and(|d| &d.id == id) {
+            return;
+        }
+        let (Some(repo), Some(commit)) = (self.repo.clone(), self.history.commit(id).cloned())
+        else {
+            return;
+        };
+        self.details = Some(Details {
+            id: id.clone(),
+            message: None,
+            files: None,
+            error: None,
+        });
+        let _ = self.worker.start(
+            DETAIL_JOB,
+            Job::CommitDetails(repo, Box::new(commit)),
+            self.runner.clone(),
+            ctx.clone(),
+        );
+    }
+
+    /// Shows the diff `key` in the centre (loading in the background).
+    fn open_diff(&mut self, key: DiffKey, title: String, ctx: &egui::Context) {
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let keep = self
+            .diff
+            .take()
+            .filter(|s| s.key == key)
+            .and_then(|s| s.prepared);
+        self.diff = Some(DiffState {
+            key: key.clone(),
+            title,
+            prepared: keep,
+            error: None,
+        });
+        if let Err(e) = self.worker.start(
+            DETAIL_JOB,
+            Job::Diff(repo, key),
+            self.runner.clone(),
+            ctx.clone(),
+        ) && let Some(s) = self.diff.as_mut()
+        {
+            s.error = Some(trf(
+                "Git konnte nicht gestartet werden: {fehler}",
+                &[("fehler", &e)],
+            ));
+        }
+    }
+
+    fn diff_view(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
+        let Some(state) = self.diff.as_mut() else {
+            return;
+        };
+        let back = match (&mut state.prepared, &state.error) {
+            (_, Some(e)) => {
+                let back = ui.button(tr("Zurück zum Graphen")).clicked();
+                ui.label(RichText::new(e).color(t.error_text));
+                back
+            }
+            (Some(prepared), None) => prepared.show(ui, t),
+            (None, None) => {
+                let back = ui.button(tr("Zurück zum Graphen")).clicked();
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new(tr("Lade Diff …")).color(t.text_dim));
+                });
+                back
+            }
+        };
+        if back {
+            self.diff = None;
+        }
     }
 
     /// Selects a commit and scrolls the history to it (if it has loaded).
     fn select_commit(&mut self, id: Oid) {
+        self.diff = None;
         self.selection = Selection::Commit(id);
         let wip = self.wip().is_some();
         if let Some(row) = self.history.row_of(&self.selection, wip) {
@@ -352,9 +503,16 @@ impl RepoWindow {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
+        if self.diff.is_some()
+            && !typing
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.diff = None;
+        }
+        let in_diff = self.diff.is_some();
         let (open, refresh, copy, focused, dropped, step) = ctx.input_mut(|i| {
             let mut step: i64 = 0;
-            if !typing {
+            if !typing && !in_diff {
                 for (key, n) in [
                     (Key::ArrowDown, 1),
                     (Key::ArrowUp, -1),
@@ -662,6 +820,8 @@ impl RepoWindow {
                         });
                         ui.end_row();
                     });
+                ui.add_space(8.0);
+                self.commit_body(ui, t, &c);
             }
             Selection::None => {
                 ui.label(RichText::new(tr("Nichts ausgewählt")).color(t.text_dim));
@@ -669,10 +829,93 @@ impl RepoWindow {
         }
     }
 
-    /// The change list of the work in progress (staging comes in milestone 0.3).
+    /// Full message and changed files of the selected commit; a click on a file shows its diff.
+    fn commit_body(&mut self, ui: &mut egui::Ui, t: &theme::Tokens, commit: &gitcraft_git::Commit) {
+        let Some(details) = self.details.as_ref().filter(|d| d.id == commit.id) else {
+            return;
+        };
+        if let Some(e) = &details.error {
+            ui.label(RichText::new(e).color(t.error_text));
+            return;
+        }
+        let (Some(message), Some(files)) = (&details.message, &details.files) else {
+            ui.add(egui::Spinner::new());
+            return;
+        };
+        // The body (the subject is the heading already).
+        let body = message.split_once('\n').map_or("", |(_, b)| b.trim());
+        if !body.is_empty() {
+            ui.add(egui::Label::new(RichText::new(escape_message(body)).color(t.text)).wrap());
+            ui.add_space(8.0);
+        }
+        ui.label(
+            RichText::new(trf("{n} Dateien geändert", &[("n", &files.len())])).color(t.text_strong),
+        );
+        let current = self.diff.as_ref().map(|s| s.key.clone());
+        let mut open = None;
+        for (i, f) in files.iter().enumerate() {
+            let key = DiffKey::Commit {
+                commit: Box::new(commit.clone()),
+                file: f.clone(),
+            };
+            let path = match &f.old_path {
+                Some(old) => format!("{} -> {}", old.display(), f.path.display()),
+                None => f.path.display(),
+            };
+            let (letter, color, meaning) = match f.status {
+                FileStatus::Added => ('A', t.added, "hinzugefügt"),
+                FileStatus::Modified => ('M', t.modified, "geändert"),
+                FileStatus::Deleted => ('D', t.deleted, "gelöscht"),
+                FileStatus::Renamed => ('R', t.renamed, "umbenannt"),
+            };
+            let row_h = ui.text_style_height(&egui::TextStyle::Body).max(20.0);
+            let inner = ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_h),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    if Some(&key) == current.as_ref() {
+                        ui.painter().rect_filled(ui.max_rect(), 0.0, t.selection);
+                    }
+                    let counts = match f.lines {
+                        Some((a, d)) => format!("+{a} -{d}"),
+                        None => tr("binär").to_owned(),
+                    };
+                    egui::Sides::new().shrink_left().show(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(letter.to_string()).monospace().color(color))
+                                .on_hover_text(tr(meaning));
+                            ui.add(egui::Label::new(path.as_str()).truncate());
+                        },
+                        |ui| {
+                            ui.label(RichText::new(counts).color(t.text_dim).size(12.0));
+                        },
+                    );
+                },
+            );
+            let resp = ui.interact(
+                inner.response.rect,
+                ui.scope_id().with(("file", i)),
+                egui::Sense::click(),
+            );
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &path));
+            if resp.clicked() {
+                open = Some((key, path));
+            }
+        }
+        if let Some((key, title)) = open {
+            let ctx = ui.ctx().clone();
+            self.open_diff(key, title, &ctx);
+        }
+    }
+
+    /// The change list of the work in progress (staging comes in milestone 0.3). A click on a
+    /// file shows its diff.
     fn changes(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
         let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
+        let current = self.diff.as_ref().map(|s| s.key.clone());
+        let mut open: Option<(DiffKey, String)> = None;
         let rows = &self.rows;
         egui::ScrollArea::vertical()
             .id_salt("changes")
@@ -680,15 +923,29 @@ impl RepoWindow {
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for (i, row) in rows.iter().enumerate().skip(range.start).take(range.len()) {
                     let size = egui::vec2(ui.available_width(), row_h);
-                    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                        // Stripes on file rows only, so section titles stand apart.
-                        if i % 2 == 1 && matches!(row, Row::File { .. }) {
+                    let inner = ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                        let selected = matches!(row, Row::File { diff: Some(k), .. } if Some(k) == current.as_ref());
+                        if selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, t.selection);
+                        } else if i % 2 == 1 && matches!(row, Row::File { .. }) {
+                            // Stripes on file rows only, so section titles stand apart.
                             ui.painter().rect_filled(ui.max_rect(), 0.0, t.row_alt);
                         }
                         draw_row(ui, row, t);
                     });
+                    if let Row::File { diff: Some(key), path, .. } = row {
+                        let resp = ui.interact(inner.response.rect, ui.scope_id().with(("change", i)), egui::Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, path));
+                        if resp.clicked() {
+                            open = Some((key.clone(), path.clone()));
+                        }
+                    }
                 }
             });
+        if let Some((key, title)) = open {
+            let ctx = ui.ctx().clone();
+            self.open_diff(key, title, &ctx);
+        }
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
@@ -724,6 +981,12 @@ fn branch_name(head: &Head) -> String {
     }
 }
 
+/// A commit message for display: line breaks kept, other control and invisible characters
+/// escaped.
+fn escape_message(text: &str) -> String {
+    text.split('\n').map(escape).collect::<Vec<_>>().join("\n")
+}
+
 /// The commit HEAD points at, if any.
 fn head_commit(status: &Status) -> Option<Oid> {
     match &status.head {
@@ -743,6 +1006,7 @@ fn draw_row(ui: &mut egui::Ui, row: &Row, t: &theme::Tokens) {
             tone,
             meaning,
             path,
+            ..
         } => {
             let colour = match tone {
                 Tone::Added => t.added,
@@ -817,7 +1081,7 @@ fn upstream_text(status: &Status) -> String {
     }
 }
 
-fn change_row(file: &FileChange, change: Change) -> Row {
+fn change_row(file: &FileChange, change: Change, staged: bool) -> Row {
     let (tone, meaning) = match change {
         Change::Added => (Tone::Added, "hinzugefügt"),
         Change::Modified => (Tone::Modified, "geändert"),
@@ -837,6 +1101,11 @@ fn change_row(file: &FileChange, change: Change) -> Row {
         tone,
         meaning,
         path,
+        diff: Some(DiffKey::Worktree {
+            path: file.path.clone(),
+            old: file.orig_path.clone(),
+            staged,
+        }),
     }
 }
 
@@ -873,17 +1142,24 @@ fn rows(status: &Status) -> Vec<Row> {
                 letter: 'U',
                 tone: Tone::Conflict,
                 meaning: conflict_meaning(c),
+                diff: None,
                 path: f.path.display(),
             })
             .collect(),
     );
     section(
         "Vorgemerkt",
-        status.staged().map(|(f, c)| change_row(f, c)).collect(),
+        status
+            .staged()
+            .map(|(f, c)| change_row(f, c, true))
+            .collect(),
     );
     section(
         "Nicht vorgemerkt",
-        status.unstaged().map(|(f, c)| change_row(f, c)).collect(),
+        status
+            .unstaged()
+            .map(|(f, c)| change_row(f, c, false))
+            .collect(),
     );
     section(
         "Unversioniert",
@@ -893,6 +1169,9 @@ fn rows(status: &Status) -> Vec<Row> {
                 letter: '?',
                 tone: Tone::Untracked,
                 meaning: "unversioniert",
+                diff: Some(DiffKey::Untracked {
+                    path: f.path.clone(),
+                }),
                 path: f.path.display(),
             })
             .collect(),
