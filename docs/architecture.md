@@ -63,7 +63,7 @@ tests on real repositories; malformed input is a `GitError::Parse`, never a pani
 | `log` | `log -z --format=<fields>` | `Commit`, `Signature`, refs |
 | `refs` | `for-each-ref --format=…` | `Branch`, `Tag`, `RemoteBranch` |
 | `stash` | `stash list -z --format=…` | `Stash` |
-| `worktree` | `worktree list --porcelain -z` | `Worktree` |
+| `worktree` | `worktree list --porcelain` (`-z` from git 2.36) | `Worktree` |
 | `state` | files in the git dir (`MERGE_HEAD`, `rebase-merge/`, …) | `RepoState` |
 | `progress` | `--progress` lines on stderr | `Progress { phase, done, total }` |
 

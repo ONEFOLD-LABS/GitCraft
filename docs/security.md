@@ -80,7 +80,7 @@ and log files; GitCraft offers to move them into the credential helper.
 
 Only `https`, `ssh`, `git` and local paths are offered; `ext::` and `fd::` stay disabled (Git's
 defaults are kept and never widened). Clone does not recurse into submodules by default;
-submodule operations run with `protocol.file.allow=user`. Plain `http` and `git://` URLs show a
+submodule operations run with `protocol.file.allow=user` (Git's default since 2.38.1, set explicitly for older versions). Plain `http` and `git://` URLs show a
 warning that the connection is not encrypted.
 
 ### Destructive operations
