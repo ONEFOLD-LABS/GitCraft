@@ -11,6 +11,7 @@ use egui_kittest::Harness;
 use gitcraft_git::{GitRunner, Repository};
 
 use super::*;
+use crate::history::History;
 
 /// A temporary repository, isolated from the user's git configuration.
 struct Fixture {
@@ -71,9 +72,20 @@ impl Fixture {
     fn window(&self) -> RepoWindow {
         let runner = self.runner();
         let repo = Repository::open(&runner, &self.repo()).unwrap();
-        let status = repo.status().unwrap();
+        let snapshot = worker::Snapshot::read(&repo).unwrap();
+        let mut log = repo.log().unwrap();
+        let mut commits = Vec::new();
+        loop {
+            let page = log.next_page(500).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            commits.extend(page);
+        }
         let mut w = RepoWindow::new(runner, None);
-        w.show_status(repo, status);
+        w.history = History::from_commits(commits);
+        w.repo = Some(repo);
+        w.apply(snapshot);
         w
     }
 
@@ -106,7 +118,7 @@ impl Fixture {
 
 fn shot(name: &str, preference: ThemePreference, mut w: RepoWindow) {
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(900.0, 560.0))
+        .with_size(egui::vec2(1200.0, 640.0))
         .wgpu()
         .build_ui(move |ui| w.ui(ui));
     theme::install(&harness.ctx, preference);
@@ -213,7 +225,7 @@ fn rows_group_conflicts_staged_unstaged_and_untracked() {
         meaning: "umbenannt",
         path: "src/alt.rs -> src/neu.rs".into(),
     }));
-    let up = w.status.as_ref().map(upstream_text).unwrap();
+    let up = w.status().map(upstream_text).unwrap();
     assert_eq!(up, "1 voraus, 1 zurück gegenüber anderer");
 }
 
@@ -230,7 +242,7 @@ fn open_runs_in_the_background() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.is_busy() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
-        w.collect();
+        w.collect(&ctx);
     }
     assert!(!w.is_busy(), "git did not answer in time");
     assert_eq!(w.error(), None);
@@ -238,7 +250,14 @@ fn open_runs_in_the_background() {
         fs::canonicalize(w.repository().unwrap().workdir()).unwrap(),
         fs::canonicalize(f.repo()).unwrap()
     );
-    assert_eq!(w.status.as_ref().unwrap().untracked().count(), 1);
+    assert_eq!(w.status().unwrap().untracked().count(), 1);
+    // The history loads in the background as well.
+    while w.history.is_loading() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        w.collect(&ctx);
+    }
+    assert!(!w.history.is_loading());
+    assert!(w.history.commits().is_empty(), "no commits yet");
 }
 
 #[test]
@@ -252,7 +271,7 @@ fn opening_something_else_shows_an_error() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.is_busy() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
-        w.collect();
+        w.collect(&ctx);
     }
     assert!(w.error().is_some_and(|e| e.contains("kein Git-Repository")));
     assert!(w.repository().is_none());
@@ -275,7 +294,11 @@ fn texts_behind_variables_are_translated() {
         "umbenannt",
         "kopiert",
         "unversioniert",
+        "Lokal",
+        "Remote",
+        "Tags",
     ];
+    texts.extend(toolbar::ACTIONS.map(|(_, label, _)| label));
     texts.extend(
         [
             C::BothModified,
@@ -288,9 +311,10 @@ fn texts_behind_variables_are_translated() {
         ]
         .map(conflict_meaning),
     );
-    i18n::set_language(i18n::Language::English);
-    let missing: Vec<&str> = texts.into_iter().filter(|t| tr(t) == *t).collect();
-    i18n::set_language(i18n::Language::German);
+    let missing: Vec<&str> = texts
+        .into_iter()
+        .filter(|t| !i18n::has_english(t))
+        .collect();
     assert!(missing.is_empty(), "missing in i18n/en.tsv: {missing:?}");
 }
 
@@ -326,4 +350,60 @@ fn ref_names_paths_and_git_messages_are_escaped() {
         repo_name(Path::new("/x/repo\u{2066}name")),
         "repo\\u{2066}name"
     );
+}
+
+/// A history with branches, a merge, tags, a remote-like branch and work in progress: refs land
+/// on their commits, the graph has two lanes, keys move the selection.
+#[test]
+fn history_with_branches_labels_and_keyboard() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    assert!(f.git(&["tag", "-a", "v0.1", "-m", "erste Version"]));
+    assert!(f.git(&["checkout", "-q", "-b", "feature"]));
+    f.write("b.txt", "1");
+    f.commit_all("Feature anlegen");
+    f.write("b.txt", "2");
+    f.commit_all("Feature ausbauen");
+    assert!(f.git(&["checkout", "-q", "main"]));
+    f.write("a.txt", "2");
+    f.commit_all("Hauptlinie weiter");
+    assert!(f.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Feature zusammenführen",
+        "feature"
+    ]));
+    assert!(f.git(&["branch", "experiment", "HEAD~1"]));
+    f.write("a.txt", "dirty");
+
+    let mut w = f.window();
+    let commits = w.history.commits();
+    assert_eq!(commits.len(), 5);
+    assert_eq!(commits[0].subject, "Feature zusammenführen");
+    let head = head_commit(w.status().unwrap()).unwrap();
+    let labels: Vec<&str> = w.labels.of(&head).iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(labels, ["main"]);
+    let tagged = commits.last().unwrap().id.clone();
+    assert_eq!(w.labels.of(&tagged)[0].text, "v0.1");
+    assert_eq!(
+        w.selection,
+        Selection::WorkInProgress,
+        "dirty tree selects the work in progress"
+    );
+
+    w.move_selection(1);
+    assert_eq!(w.selection, Selection::Commit(head.clone()));
+    w.move_selection(100);
+    assert_eq!(w.selection, Selection::Commit(tagged));
+    w.move_selection(-1000);
+    assert_eq!(w.selection, Selection::WorkInProgress);
+
+    shot("history-dark", ThemePreference::Dark, f.window());
+    shot("history-light", ThemePreference::Light, f.window());
+    let mut w = f.window();
+    w.select_commit(head);
+    shot("history-commit-dark", ThemePreference::Dark, w);
 }

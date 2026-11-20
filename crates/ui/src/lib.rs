@@ -1,26 +1,33 @@
 //! GitCraft's user interface (egui): the repository window.
 //!
-//! First milestone (docs/spec.md, "Current Objective"): open a local repository and show where
-//! HEAD is, how the branch relates to its upstream, and what is conflicted, staged, changed and
-//! untracked. Git runs on worker threads ([`worker`]); the window never waits for it.
+//! Layout and operation follow docs/ux/layout.md: toolbar on top, sidebar with refs on the
+//! left, the history graph in the centre, details of the selection on the right, status line at
+//! the bottom. Git runs on worker threads ([`worker`], [`history`]); the window never waits for
+//! it.
 
+mod history;
 pub mod i18n;
+mod sidebar;
 pub mod theme;
+mod toolbar;
 mod worker;
 
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_git::{
-    Change, Conflict, FileChange, GitError, GitRunner, GitVersion, Head, MIN_VERSION, Repository,
-    Status, escape,
+    Change, Conflict, FileChange, GitError, GitRunner, GitVersion, Head, MIN_VERSION, Oid,
+    Repository, Status, escape,
 };
 
+use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
-use crate::worker::{Job, Outcome, Worker};
+use crate::sidebar::Sidebar;
+use crate::worker::{Job, Outcome, Snapshot, Worker};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
+const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
 
 /// Colour role of a file row; the colour itself comes from the theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +40,7 @@ enum Tone {
     Untracked,
 }
 
-/// One line of the change list. The list is built once per status and drawn virtualised.
+/// One line of the change list of the work in progress.
 #[derive(Debug, Clone, PartialEq)]
 enum Row {
     Section {
@@ -60,8 +67,12 @@ enum Busy {
 pub struct RepoWindow {
     runner: GitRunner,
     repo: Option<Repository>,
-    status: Option<Status>,
+    snapshot: Option<Snapshot>,
     rows: Vec<Row>,
+    labels: Labels,
+    history: History,
+    selection: Selection,
+    sidebar: Sidebar,
     error: Option<String>,
     busy: Option<Busy>,
     git_version: Option<GitVersion>,
@@ -80,8 +91,12 @@ impl RepoWindow {
         RepoWindow {
             runner,
             repo: None,
-            status: None,
+            snapshot: None,
             rows: Vec::new(),
+            labels: Labels::default(),
+            history: History::empty(),
+            selection: Selection::None,
+            sidebar: Sidebar::default(),
             error: None,
             busy: None,
             git_version: None,
@@ -98,14 +113,14 @@ impl RepoWindow {
         self.start(Job::Open(path.clone()), Busy::Opening(path), ctx);
     }
 
-    /// Reads the status of the open repository again (in the background).
+    /// Reads the state of the open repository again (in the background).
     pub fn refresh(&mut self, ctx: &egui::Context) {
         if let Some(repo) = self.repo.clone() {
             self.start(Job::Refresh(repo), Busy::Refreshing, ctx);
         }
     }
 
-    /// True while git is working for the window.
+    /// True while git is working for the window (the history may still load afterwards).
     pub fn is_busy(&self) -> bool {
         self.busy.is_some()
     }
@@ -118,6 +133,10 @@ impl RepoWindow {
     /// The last error message, if any.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    fn status(&self) -> Option<&Status> {
+        self.snapshot.as_ref().map(|s| &s.status)
     }
 
     fn start(&mut self, job: Job, busy: Busy, ctx: &egui::Context) {
@@ -137,15 +156,40 @@ impl RepoWindow {
         }
     }
 
-    /// Shows `status` of `repo` (also used by tests that read the status synchronously).
-    fn show_status(&mut self, repo: Repository, status: Status) {
-        self.rows = rows(&status);
+    /// Shows a freshly opened repository; the history starts loading.
+    fn show_opened(&mut self, repo: Repository, snapshot: Snapshot, ctx: &egui::Context) {
+        self.history = History::start(&repo, ctx);
         self.repo = Some(repo);
-        self.status = Some(status);
+        self.selection = Selection::None;
+        self.apply(snapshot);
+    }
+
+    /// Takes a new snapshot; restarts the history when branches, tags or HEAD moved.
+    fn refreshed(&mut self, snapshot: Snapshot, ctx: &egui::Context) {
+        let moved = self.snapshot.as_ref().is_none_or(|old| {
+            old.refs != snapshot.refs || head_commit(&old.status) != head_commit(&snapshot.status)
+        });
+        if moved && let Some(repo) = &self.repo {
+            self.history = History::start(repo, ctx);
+        }
+        self.apply(snapshot);
+    }
+
+    fn apply(&mut self, snapshot: Snapshot) {
+        self.rows = rows(&snapshot.status);
+        self.labels = Labels::new(&snapshot.refs);
+        let dirty = !snapshot.status.is_clean();
+        if self.selection == Selection::WorkInProgress && !dirty {
+            self.selection = Selection::None;
+        }
+        if self.selection == Selection::None && dirty {
+            self.selection = Selection::WorkInProgress;
+        }
+        self.snapshot = Some(snapshot);
         self.error = None;
     }
 
-    fn collect(&mut self) {
+    fn collect(&mut self, ctx: &egui::Context) {
         for (generation, outcome) in self.worker.poll() {
             if let Outcome::Version(v) = outcome {
                 self.git_version = Some(v);
@@ -157,18 +201,31 @@ impl RepoWindow {
             self.busy = None;
             match outcome {
                 Outcome::Opened(opened) => {
-                    let (repo, status) = *opened;
-                    self.show_status(repo, status);
+                    let (repo, snapshot) = *opened;
+                    self.show_opened(repo, snapshot, ctx);
                 }
-                Outcome::Refreshed(status) => {
-                    self.rows = rows(&status);
-                    self.status = Some(status);
-                    self.error = None;
-                }
+                Outcome::Refreshed(snapshot) => self.refreshed(*snapshot, ctx),
                 Outcome::Failed(e) => self.error = Some(error_text(&e)),
                 Outcome::Version(_) => {}
             }
         }
+        self.history.poll();
+        // Nothing selected yet: the commit at HEAD once it has loaded.
+        if self.selection == Selection::None
+            && let Some(head) = self.status().and_then(head_commit)
+            && self.history.position(&head).is_some()
+        {
+            self.selection = Selection::Commit(head);
+        }
+    }
+
+    fn wip(&self) -> Option<WipCounts> {
+        let status = self.status()?;
+        (!status.is_clean()).then(|| WipCounts {
+            changed: status.unstaged().count() + status.untracked().count(),
+            staged: status.staged().count(),
+            conflicts: status.conflicts().count(),
+        })
     }
 
     /// Draws the window and handles its input.
@@ -184,30 +241,94 @@ impl RepoWindow {
         if let Some(path) = self.pending_open.take() {
             self.open(path, &ctx);
         }
-        self.collect();
+        self.collect(&ctx);
         self.handle_input(&ctx);
+        let t = theme::tokens(&ctx);
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
-        if self.error.is_some() || self.repo.is_some() {
-            egui::Panel::top("kopf").show(ui, |ui| self.header(ui));
+        if let Some(error) = &self.error {
+            egui::Panel::top("fehler").show(ui, |ui| {
+                egui::Frame::new()
+                    .fill(t.error_bg)
+                    .inner_margin(8)
+                    .corner_radius(4)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(error).color(t.error_text));
+                    });
+            });
         }
         egui::Panel::bottom("statuszeile")
             .exact_size(22.0)
             .show(ui, |ui| self.status_line(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.changes(ui));
+        if self.repo.is_none() {
+            egui::CentralPanel::default().show(ui, |ui| {
+                if self.busy.is_none() {
+                    self.welcome(ui);
+                }
+            });
+            return;
+        }
+        egui::Panel::left("seitenleiste")
+            .resizable(true)
+            .default_size(230.0)
+            .min_size(150.0)
+            .show(ui, |ui| {
+                let (refs, stashes) = self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| (s.refs.as_slice(), s.stashes.as_slice()))
+                    .unwrap_or_default();
+                if let Some(id) = self.sidebar.show(ui, t, refs, stashes) {
+                    self.select_commit(id);
+                }
+            });
+        egui::Panel::right("details")
+            .resizable(true)
+            .default_size(340.0)
+            .min_size(220.0)
+            .show(ui, |ui| self.details(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.history_view(ui));
+    }
+
+    /// Selects a commit and scrolls the history to it (if it has loaded).
+    fn select_commit(&mut self, id: Oid) {
+        self.selection = Selection::Commit(id);
+        let wip = self.wip().is_some();
+        if let Some(row) = self.history.row_of(&self.selection, wip) {
+            self.history.scroll_to(row);
+        }
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
-        let (open, refresh, focused, dropped) = ctx.input_mut(|i| {
+        let typing = ctx.memory(|m| m.focused().is_some());
+        let (open, refresh, copy, focused, dropped, step) = ctx.input_mut(|i| {
+            let mut step: i64 = 0;
+            if !typing {
+                for (key, n) in [
+                    (Key::ArrowDown, 1),
+                    (Key::ArrowUp, -1),
+                    (Key::PageDown, 20),
+                    (Key::PageUp, -20),
+                    (Key::End, i64::MAX / 2),
+                    (Key::Home, -(i64::MAX / 2)),
+                ] {
+                    if i.consume_key(Modifiers::NONE, key) {
+                        step = step.saturating_add(n);
+                    }
+                }
+            }
             (
                 i.consume_shortcut(&OPEN),
                 i.consume_shortcut(&REFRESH),
+                !typing && i.consume_shortcut(&COPY),
                 i.focused,
                 i.raw
                     .dropped_files
                     .iter()
                     .map(|f| f.path().to_path_buf())
                     .next(),
+                step,
             )
         });
         if open {
@@ -220,6 +341,29 @@ impl RepoWindow {
             self.refresh(ctx);
         }
         self.was_focused = focused;
+        if step != 0 {
+            self.move_selection(step);
+        }
+        if copy && let Selection::Commit(id) = &self.selection {
+            ctx.copy_text(id.as_str().to_owned());
+        }
+    }
+
+    fn move_selection(&mut self, step: i64) {
+        let wip = self.wip().is_some();
+        let total = self.history.display_rows(wip);
+        if total == 0 {
+            return;
+        }
+        let current = self.history.row_of(&self.selection, wip).unwrap_or(0);
+        let last = i64::try_from(total - 1).unwrap_or(i64::MAX);
+        let target = i64::try_from(current)
+            .unwrap_or(0)
+            .saturating_add(step)
+            .clamp(0, last);
+        let row = usize::try_from(target).unwrap_or(0);
+        self.selection = self.history.selection_at(row, wip);
+        self.history.scroll_to(row);
     }
 
     fn pick_folder(&mut self, ctx: &egui::Context) {
@@ -234,73 +378,60 @@ impl RepoWindow {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let t = theme::tokens(&ctx);
         ui.horizontal(|ui| {
-            let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
-                &ctx,
-                tr("Repository öffnen"),
-                &OPEN,
-            ));
-            if open.clicked() {
-                self.pick_folder(&ctx);
+            if let (Some(repo), Some(status)) = (&self.repo, self.status()) {
+                toolbar::caption(
+                    ui,
+                    t,
+                    tr("Repository"),
+                    &repo_name(repo.workdir()),
+                    &shown_path(repo.workdir()),
+                );
+                toolbar::caption(
+                    ui,
+                    t,
+                    tr("Branch"),
+                    &branch_name(&status.head),
+                    &format!("{} · {}", head_text(&status.head), upstream_text(status)),
+                );
+                ui.separator();
             }
-            let refresh = ui
-                .add_enabled(
-                    self.repo.is_some() && !self.is_busy(),
-                    egui::Button::new(tr("Aktualisieren")),
-                )
-                .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
-            if refresh.clicked() {
-                self.refresh(&ctx);
-            }
-            if let Some(busy) = &self.busy {
-                ui.add(egui::Spinner::new());
-                let text = match busy {
-                    Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
-                    Busy::Refreshing => tr("Lese Status …").to_owned(),
-                };
-                ui.label(RichText::new(text).color(theme::tokens(&ctx).text_dim));
-            }
+            toolbar::coming(ui, t);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refresh = ui
+                    .add_enabled(
+                        self.repo.is_some() && !self.is_busy(),
+                        egui::Button::new(tr("Aktualisieren")),
+                    )
+                    .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
+                if refresh.clicked() {
+                    self.refresh(&ctx);
+                }
+                let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
+                    &ctx,
+                    tr("Repository öffnen"),
+                    &OPEN,
+                ));
+                if open.clicked() {
+                    self.pick_folder(&ctx);
+                }
+                if let Some(busy) = &self.busy {
+                    let text = match busy {
+                        Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
+                        Busy::Refreshing => tr("Lese Status …").to_owned(),
+                    };
+                    ui.label(RichText::new(text).color(t.text_dim));
+                    ui.add(egui::Spinner::new());
+                }
+            });
         });
-    }
-
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let t = theme::tokens(ui.ctx());
-        if let Some(error) = &self.error {
-            egui::Frame::new()
-                .fill(t.error_bg)
-                .inner_margin(8)
-                .corner_radius(4)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(error).color(t.error_text));
-                });
-        }
-        let (Some(repo), Some(status)) = (&self.repo, &self.status) else {
-            return;
-        };
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(repo_name(repo.workdir()))
-                    .color(t.text_strong)
-                    .size(16.0),
-            );
-            ui.add(
-                egui::Label::new(RichText::new(shown_path(repo.workdir())).color(t.text_dim))
-                    .truncate(),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label(head_text(&status.head));
-            ui.label(RichText::new("·").color(t.text_dim));
-            ui.label(RichText::new(upstream_text(status)).color(t.text_dim));
-        });
-        ui.add_space(2.0);
     }
 
     fn status_line(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            if let Some(status) = &self.status {
+            if let Some(status) = self.status() {
                 let text = trf(
                     "Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}",
                     &[
@@ -312,6 +443,16 @@ impl RepoWindow {
                 );
                 ui.label(RichText::new(text).color(t.text_dim));
             }
+            if self.repo.is_some() {
+                let n = self.history.commits().len();
+                let text = if self.history.is_loading() {
+                    trf("{n} Commits geladen …", &[("n", &n)])
+                } else {
+                    trf("{n} Commits", &[("n", &n)])
+                };
+                ui.label(RichText::new("·").color(t.text_dim));
+                ui.label(RichText::new(text).color(t.text_dim));
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(v) = self.git_version {
                     ui.label(RichText::new(format!("git {v}")).color(t.text_dim));
@@ -320,38 +461,136 @@ impl RepoWindow {
         });
     }
 
-    fn changes(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let t = theme::tokens(&ctx);
-        let Some(status) = &self.status else {
-            if self.busy.is_none() {
-                self.welcome(ui);
-            }
-            return;
-        };
-        if status.is_clean() {
-            let unborn = matches!(status.head, Head::Branch { commit: None, .. });
-            let (title, text) = if unborn {
-                (
-                    tr("Leeres Repository"),
-                    tr("Noch keine Commits und keine Dateien."),
-                )
-            } else {
-                (
-                    tr("Keine Änderungen"),
-                    tr("Arbeitsverzeichnis und Index entsprechen dem letzten Commit."),
-                )
-            };
+    fn history_view(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
+        if let Some(e) = self.history.error() {
+            ui.label(RichText::new(error_text(e)).color(t.error_text));
+        }
+        let wip = self.wip();
+        if self.history.commits().is_empty() && wip.is_none() && !self.history.is_loading() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new(title).color(t.text_strong).size(16.0));
-                ui.label(RichText::new(text).color(t.text_dim));
+                ui.label(
+                    RichText::new(tr("Leeres Repository"))
+                        .color(t.text_strong)
+                        .size(16.0),
+                );
+                ui.label(
+                    RichText::new(tr("Noch keine Commits und keine Dateien.")).color(t.text_dim),
+                );
             });
             return;
         }
+        let head = self.status().and_then(head_commit);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let view = View {
+            labels: &self.labels,
+            wip,
+            head: head.as_ref(),
+            now,
+        };
+        let actions = self.history.show(ui, t, &view, &self.selection);
+        for action in actions {
+            match action {
+                Action::Select(s) => self.selection = s,
+                Action::CopyId(id) => ui.ctx().copy_text(id.as_str().to_owned()),
+                Action::CopyMessage(m) => ui.ctx().copy_text(m),
+            }
+        }
+    }
+
+    /// The details panel: the selected commit, or the changes of the work in progress.
+    fn details(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
+        // Keep the panel at its width instead of shrinking to the content.
+        ui.set_min_width(ui.available_width());
+        match self.selection.clone() {
+            Selection::WorkInProgress => {
+                ui.label(
+                    RichText::new(tr("Arbeitsstand"))
+                        .color(t.text_strong)
+                        .size(15.0),
+                );
+                ui.add_space(4.0);
+                self.changes(ui);
+            }
+            Selection::Commit(id) => {
+                let Some(c) = self.history.commit(&id).cloned() else {
+                    return;
+                };
+                ui.label(
+                    RichText::new(escape(&c.subject))
+                        .color(t.text_strong)
+                        .size(15.0),
+                );
+                ui.add_space(6.0);
+                let labels = self.labels.of(&c.id);
+                if !labels.is_empty() {
+                    let names: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
+                    ui.label(RichText::new(names.join(", ")).color(t.accent));
+                }
+                egui::Grid::new("commit-details")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(tr("Commit")).color(t.text_dim));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(c.id.short()).monospace())
+                                .on_hover_text(c.id.as_str());
+                            if ui.small_button(tr("Kopieren")).clicked() {
+                                ui.ctx().copy_text(c.id.as_str().to_owned());
+                            }
+                        });
+                        ui.end_row();
+                        ui.label(RichText::new(tr("Autor")).color(t.text_dim));
+                        ui.label(format!(
+                            "{} <{}>\n{}",
+                            escape(&c.author.name),
+                            escape(&c.author.email),
+                            history::absolute_date(c.author.time)
+                        ));
+                        ui.end_row();
+                        if c.committer != c.author {
+                            ui.label(RichText::new(tr("Committer")).color(t.text_dim));
+                            ui.label(format!(
+                                "{} <{}>\n{}",
+                                escape(&c.committer.name),
+                                escape(&c.committer.email),
+                                history::absolute_date(c.committer.time)
+                            ));
+                            ui.end_row();
+                        }
+                        ui.label(RichText::new(tr("Eltern")).color(t.text_dim));
+                        ui.horizontal_wrapped(|ui| {
+                            if c.parents.is_empty() {
+                                ui.label(
+                                    RichText::new(tr("keine (erster Commit)")).color(t.text_dim),
+                                );
+                            }
+                            for p in &c.parents {
+                                if ui.link(p.short()).on_hover_text(p.as_str()).clicked() {
+                                    self.select_commit(p.clone());
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    });
+            }
+            Selection::None => {
+                ui.label(RichText::new(tr("Nichts ausgewählt")).color(t.text_dim));
+            }
+        }
+    }
+
+    /// The change list of the work in progress (staging comes in milestone 0.3).
+    fn changes(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
         let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
         let rows = &self.rows;
         egui::ScrollArea::vertical()
+            .id_salt("changes")
             .auto_shrink([false, false])
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for (i, row) in rows.iter().enumerate().skip(range.start).take(range.len()) {
@@ -389,6 +628,22 @@ impl RepoWindow {
                 self.pick_folder(&ctx);
             }
         });
+    }
+}
+
+/// The branch name for the toolbar, or `HEAD 1a2b3c4` when detached.
+fn branch_name(head: &Head) -> String {
+    match head {
+        Head::Branch { name, .. } => escape(name),
+        Head::Detached { commit } => format!("HEAD {}", commit.short()),
+    }
+}
+
+/// The commit HEAD points at, if any.
+fn head_commit(status: &Status) -> Option<Oid> {
+    match &status.head {
+        Head::Branch { commit, .. } => commit.clone(),
+        Head::Detached { commit } => Some(commit.clone()),
     }
 }
 
@@ -605,7 +860,10 @@ fn error_text(e: &GitError) -> String {
             "Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.",
             &[("schluessel", &escape(key))],
         ),
-        GitError::Parse(err) => trf("Unerwartete Ausgabe von git: {fehler}", &[("fehler", err)]),
+        GitError::Parse(err) => trf(
+            "Unerwartete Ausgabe von git: {fehler}",
+            &[("fehler", &escape(err))],
+        ),
     }
 }
 

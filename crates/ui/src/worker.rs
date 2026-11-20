@@ -4,13 +4,32 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use gitcraft_git::{GitError, GitRunner, GitVersion, Repository, Status};
+use gitcraft_git::{GitError, GitRunner, GitVersion, Ref, Repository, Stash, Status};
+
+/// What the window shows of a repository besides the history: read together so that status,
+/// refs and stashes always belong to the same moment.
+#[derive(Debug, Clone)]
+pub(crate) struct Snapshot {
+    pub status: Status,
+    pub refs: Vec<Ref>,
+    pub stashes: Vec<Stash>,
+}
+
+impl Snapshot {
+    pub(crate) fn read(repo: &Repository) -> Result<Snapshot, GitError> {
+        Ok(Snapshot {
+            status: repo.status()?,
+            refs: repo.refs()?,
+            stashes: repo.stashes()?,
+        })
+    }
+}
 
 /// Work for git.
 pub(crate) enum Job {
-    /// Check the installed git, open the repository at the path, read its status.
+    /// Check the installed git, open the repository at the path, read its snapshot.
     Open(PathBuf),
-    /// Read the status of an opened repository again.
+    /// Read the snapshot of an opened repository again.
     Refresh(Repository),
     /// Read the installed git version.
     Version,
@@ -18,8 +37,8 @@ pub(crate) enum Job {
 
 /// What a job produced.
 pub(crate) enum Outcome {
-    Opened(Box<(Repository, Status)>),
-    Refreshed(Status),
+    Opened(Box<(Repository, Snapshot)>),
+    Refreshed(Box<Snapshot>),
     Version(GitVersion),
     Failed(GitError),
 }
@@ -67,10 +86,10 @@ fn run(job: Job, runner: &GitRunner) -> Result<Outcome, GitError> {
         Job::Open(path) => {
             runner.version()?;
             let repo = Repository::open(runner, &path)?;
-            let status = repo.status()?;
-            Outcome::Opened(Box::new((repo, status)))
+            let snapshot = Snapshot::read(&repo)?;
+            Outcome::Opened(Box::new((repo, snapshot)))
         }
-        Job::Refresh(repo) => Outcome::Refreshed(repo.status()?),
+        Job::Refresh(repo) => Outcome::Refreshed(Box::new(Snapshot::read(&repo)?)),
         Job::Version => Outcome::Version(runner.version()?),
     })
 }
