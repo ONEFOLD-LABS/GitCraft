@@ -2022,3 +2022,182 @@ fn credentials_in_urls_move_into_the_helper() {
     let stored = fs::read_to_string(&store).unwrap();
     assert!(stored.contains("me:s3cret@example.org"), "{stored}");
 }
+
+/// A repository with a commit on `main`, pushed to the bare `up.git`, and a second clone
+/// `other` of it (for commits that arrive from elsewhere).
+fn with_remote() -> Fixture {
+    let f = Fixture::new();
+    f.write("a.txt", "1\n");
+    f.commit_all("Anfang");
+    let up = f.tmp.path().join("up.git");
+    let ok = f
+        .command(f.tmp.path())
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(&up)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    f.git(&["remote", "add", "origin", up.to_str().unwrap()]);
+    f.git(&["push", "-q", "-u", "origin", "main"]);
+    let ok = f
+        .command(f.tmp.path())
+        .args(["clone", "-q"])
+        .arg(&up)
+        .arg(f.tmp.path().join("other"))
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    f
+}
+
+impl Fixture {
+    fn in_other(&self, args: &[&str]) {
+        let out = self
+            .command(&self.tmp.path().join("other"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Commits `file` with `content` in `other` and pushes it.
+    fn push_from_other(&self, file: &str, content: &str) {
+        fs::write(self.tmp.path().join("other").join(file), content).unwrap();
+        self.in_other(&["add", "-A"]);
+        self.in_other(&["commit", "-q", "-m", file]);
+        self.in_other(&["push", "-q", "origin", "HEAD"]);
+    }
+
+    fn head(&self) -> String {
+        let out = self
+            .command(&self.repo())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+}
+
+fn no_progress() -> gitcraft_git::OnProgress {
+    Arc::new(|_| {})
+}
+
+#[test]
+fn fetch_reports_new_commits_per_branch_and_prunes() {
+    let f = with_remote();
+    f.push_from_other("b.txt", "2\n");
+    f.push_from_other("c.txt", "3\n");
+    f.in_other(&["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    let repo = f.open();
+    let cancel = Cancel::new();
+    let updates = repo
+        .fetch(Some("origin"), false, &cancel, no_progress())
+        .unwrap();
+    let main = updates.iter().find(|u| u.name == "origin/main").unwrap();
+    assert_eq!(main.commits, Some(2));
+    assert!(!main.forced);
+    let feature = updates.iter().find(|u| u.name == "origin/feature").unwrap();
+    assert_eq!(feature.old, None, "new branch");
+    assert_eq!(repo.divergence().unwrap(), (0, 2));
+
+    f.in_other(&["push", "-q", "origin", "--delete", "feature"]);
+    let updates = repo.fetch(None, true, &cancel, no_progress()).unwrap();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].name, "origin/feature");
+    assert_eq!(updates[0].new, None, "pruned");
+    assert!(matches!(
+        repo.fetch(Some("--upload-pack=touch x"), false, &cancel, no_progress()),
+        Err(GitError::InvalidName { .. })
+    ));
+}
+
+#[test]
+fn pull_fast_forwards_and_explains_divergence() {
+    let f = with_remote();
+    f.push_from_other("b.txt", "2\n");
+    let repo = f.open();
+    let cancel = Cancel::new();
+    repo.pull(gitcraft_git::PullMode::FastForward, &cancel, no_progress())
+        .unwrap();
+    assert!(f.repo().join("b.txt").exists());
+
+    // Both sides move on: fast-forward refused before anything changes.
+    f.push_from_other("c.txt", "3\n");
+    f.write("d.txt", "4\n");
+    f.commit_all("lokal");
+    let head = f.head();
+    // Even when the configuration asks for a rebase.
+    f.git(&["config", "pull.rebase", "true"]);
+    f.git(&["config", "user.name", "Test"]);
+    f.git(&["config", "user.email", "test@invalid"]);
+    repo.fetch(Some("origin"), false, &cancel, no_progress())
+        .unwrap();
+    assert_eq!(
+        repo.pull(gitcraft_git::PullMode::FastForward, &cancel, no_progress()),
+        Err(GitError::Diverged {
+            ahead: 1,
+            behind: 1
+        })
+    );
+    assert_eq!(f.head(), head);
+    // The explicit choice: a merge commit.
+    repo.pull(gitcraft_git::PullMode::Merge, &cancel, no_progress())
+        .unwrap();
+    assert!(f.repo().join("c.txt").exists());
+    assert_eq!(repo.divergence().unwrap(), (2, 0), "local commit and merge");
+}
+
+#[test]
+fn pull_rebase_conflicts_and_missing_upstream() {
+    let f = with_remote();
+    f.push_from_other("a.txt", "remote\n");
+    f.write("a.txt", "lokal\n");
+    f.commit_all("lokal");
+    let repo = f.open();
+    let cancel = Cancel::new();
+    assert!(matches!(
+        repo.pull(gitcraft_git::PullMode::Rebase, &cancel, no_progress()),
+        Err(GitError::MergeConflicts(_))
+    ));
+    assert!(f.git_may_fail(&["rebase", "--abort"]));
+
+    f.git(&["switch", "-q", "-c", "solo"]);
+    assert_eq!(
+        repo.pull(gitcraft_git::PullMode::FastForward, &cancel, no_progress()),
+        Err(GitError::NoUpstream)
+    );
+}
+
+/// Cancelling a fetch that hangs (an ssh that never answers) stops it quickly and leaves the
+/// repository as it was.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_fetch_leaves_the_repository_consistent() {
+    let f = with_remote();
+    f.git(&["remote", "add", "slow", "ssh://example.invalid/r.git"]);
+    let runner = f
+        .runner()
+        .env("GIT_SSH_COMMAND", "sh -c 'sleep 30'")
+        .env("GIT_SSH_VARIANT", "simple");
+    let repo = Repository::open(&runner, &f.repo()).unwrap();
+    let before = f.head();
+    let cancel = Cancel::new();
+    let later = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        later.cancel();
+    });
+    let start = std::time::Instant::now();
+    assert_eq!(
+        repo.fetch(Some("slow"), true, &cancel, no_progress()),
+        Err(GitError::Cancelled)
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(f.head(), before);
+    f.git(&["fsck", "--no-progress"]);
+    assert!(repo.status().is_ok());
+}

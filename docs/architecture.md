@@ -43,7 +43,8 @@ exists):
 |---|---|---|---|
 | `read(cwd, args)` | status, diff, log, show, rev-parse, for-each-ref | no optional locks (`GIT_OPTIONAL_LOCKS=0`) | never run |
 | `write(cwd, config, args, input, cancel)` | add, restore, commit, branch, apply, … | normal | run where Git runs them |
-| `stream(cwd, config, args)` | log pages, search results (fetch/push progress later) | as read | never run |
+| `write_progress(cwd, config, args, cancel, on_progress)` | fetch, pull (push, clone later): progress lines from stderr reported as they arrive, git's other lines kept as its message | normal | run where Git runs them |
+| `stream(cwd, config, args)` | log pages, search results | as read | never run |
 
 Each call runs in its own process group; cancelling a write ends git and everything it started
 (on Windows only git itself so far). Every call is recorded in the session's command log.
@@ -68,7 +69,7 @@ tests on real repositories; malformed input is a `GitError::Parse`, never a pani
 | `remote` (done) | `config -z --get-regexp ^remote\..*\.(url\|pushurl)$` | `Remote`; URL check (`check_url`) and redaction (`redact_url`) |
 | `worktree` | `worktree list --porcelain` (`-z` from git 2.36) | `Worktree` |
 | `state` | files in the git dir (`MERGE_HEAD`, `rebase-merge/`, …) | `RepoState` |
-| `progress` | `--progress` lines on stderr | `Progress { phase, done, total }` |
+| `progress` (done) | `--progress` lines on stderr | `Progress { phase, remote, done, total }` |
 
 ### Paths
 

@@ -14,6 +14,7 @@ mod diffview;
 mod discard;
 mod history;
 pub mod i18n;
+mod network;
 mod remotes;
 mod search;
 pub mod settings;
@@ -189,6 +190,8 @@ pub struct RepoWindow {
     branch_dialog: Option<branches::Dialog>,
     /// An open remote dialog.
     remote_dialog: Option<remotes::Dialog>,
+    /// A fetch or pull that is running.
+    running: Option<network::Running>,
     /// Saved states of discarded and deleted files, newest first.
     discarded: Vec<Discarded>,
     show_discarded: bool,
@@ -237,6 +240,7 @@ impl RepoWindow {
             notice: None,
             branch_dialog: None,
             remote_dialog: None,
+            running: None,
             extra_commit: None,
             compare: None,
             undo: undo::History::default(),
@@ -332,6 +336,23 @@ impl RepoWindow {
             self.trust_prompt = Some(command);
         }
         false
+    }
+
+    /// Starts a fetch or pull whose progress the toolbar shows.
+    fn start(&mut self, command: Command, title: String) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if !session.is_trusted() {
+            self.write(command);
+            return;
+        }
+        let id = session.submit(command);
+        self.running = Some(network::Running {
+            id,
+            title,
+            progress: None,
+        });
     }
 
     /// The user trusts the open repository: remembered in the settings, the waiting write runs.
@@ -471,11 +492,19 @@ impl RepoWindow {
             .unwrap_or_default();
         for event in events {
             match event {
+                Event::Progress { id, progress } => {
+                    if let Some(r) = self.running.as_mut().filter(|r| r.id == id) {
+                        r.progress = Some(progress);
+                    }
+                }
                 Event::Finished {
                     id,
                     command,
                     result,
                 } => {
+                    if self.running.as_ref().is_some_and(|r| r.id == id) {
+                        self.running = None;
+                    }
                     let replay = self.replay_ids.remove(&id);
                     if !replay
                         && let Ok(outcome) = &result
@@ -584,6 +613,39 @@ impl RepoWindow {
                     trf("Tag {name} gelöscht.", &[("name", &escape(&name))]),
                     Some(Command::RestoreTag { name, object }),
                 ));
+            }
+            (Command::Fetch { .. }, Ok(Outcome::Fetched(updates))) => {
+                self.error = None;
+                self.notice = Some((network::fetch_summary(&updates), None));
+            }
+            (Command::Pull(_), Ok(Outcome::Pulled { before, after, .. })) => {
+                self.error = None;
+                let text = if before == after {
+                    tr("Pull: schon aktuell.")
+                } else {
+                    tr("Pull fertig.")
+                };
+                self.notice = Some((text.to_owned(), None));
+            }
+            (Command::Pull(_), Err(GitError::Diverged { ahead, behind })) => {
+                let (branch, upstream) = self
+                    .status()
+                    .map(|s| {
+                        (
+                            branch_name(&s.head),
+                            s.upstream
+                                .as_ref()
+                                .map(|u| u.name.clone())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or_default();
+                self.remote_dialog = Some(remotes::Dialog::Diverged {
+                    branch,
+                    upstream,
+                    ahead,
+                    behind,
+                });
             }
             (Command::RemoveRemote(name), Ok(Outcome::RemoteRemoved(remote))) => {
                 self.error = None;
@@ -943,6 +1005,16 @@ impl RepoWindow {
                         self.branch_dialog = Some(branches::Dialog::Delete { name, loss: None });
                     }
                     Some(Pick::AddRemote) => self.remote_dialog = Some(remotes::Dialog::add()),
+                    Some(Pick::Fetch(name)) => {
+                        let title = trf("Fetch {name}", &[("name", &escape(&name))]);
+                        self.start(
+                            Command::Fetch {
+                                remote: Some(name),
+                                prune: false,
+                            },
+                            title,
+                        );
+                    }
                     Some(Pick::EditRemote(name)) => {
                         if let Some(r) = remotes.iter().find(|r| r.name == name) {
                             self.remote_dialog = Some(remotes::Dialog::Edit {
@@ -1330,6 +1402,32 @@ impl RepoWindow {
                         tr("Nichts zu wiederholen").to_owned(),
                     ),
                 });
+                let remotes = self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| !s.remotes.is_empty());
+                let upstream = self.status().is_some_and(|s| s.upstream.is_some());
+                let busy = self.running.is_some();
+                known.push((
+                    toolbar::Icon::Fetch,
+                    remotes && !busy,
+                    if !remotes {
+                        tr("Kein Remote eingerichtet")
+                    } else {
+                        tr("Alle Remotes holen, ohne lokal etwas zu ändern (Rechtsklick: mit Aufräumen)")
+                    }
+                    .to_owned(),
+                ));
+                known.push((
+                    toolbar::Icon::Pull,
+                    upstream && !busy,
+                    if !upstream {
+                        tr("Der Branch hat keinen Upstream")
+                    } else {
+                        tr("Upstream holen und vorspulen (Rechtsklick: Merge oder Rebase)")
+                    }
+                    .to_owned(),
+                ));
                 known.push((toolbar::Icon::Branch, true, tr("Neuer Branch").to_owned()));
                 let dirty = self.status().is_some_and(|s| !s.is_clean());
                 known.push((
@@ -1357,7 +1455,68 @@ impl RepoWindow {
                     .to_owned(),
                 ));
             }
-            match toolbar::actions(ui, t, behind, ahead, &known) {
+            let mut chosen: Option<Command> = None;
+            let mut menus = |icon: toolbar::Icon, resp: &egui::Response| match icon {
+                toolbar::Icon::Fetch => {
+                    resp.context_menu(|ui| {
+                        if ui.button(tr("Alle Remotes holen")).clicked() {
+                            chosen = Some(Command::Fetch {
+                                remote: None,
+                                prune: false,
+                            });
+                            ui.close();
+                        }
+                        if ui
+                            .button(tr("Alle holen und aufräumen (Prune)"))
+                            .on_hover_text(tr(
+                                "Entfernt Remote-Branches, deren Branch es auf dem Remote nicht mehr gibt.",
+                            ))
+                            .clicked()
+                        {
+                            chosen = Some(Command::Fetch {
+                                remote: None,
+                                prune: true,
+                            });
+                            ui.close();
+                        }
+                    });
+                }
+                toolbar::Icon::Pull => {
+                    resp.context_menu(|ui| {
+                        for (label, mode) in [
+                            ("Pull (nur Vorspulen)", gitcraft_git::PullMode::FastForward),
+                            ("Pull mit Merge", gitcraft_git::PullMode::Merge),
+                            ("Pull mit Rebase", gitcraft_git::PullMode::Rebase),
+                        ] {
+                            if ui.button(tr(label)).clicked() {
+                                chosen = Some(Command::Pull(mode));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            };
+            let clicked = toolbar::actions(ui, t, behind, ahead, &known, &mut menus);
+            match chosen {
+                Some(command @ Command::Fetch { .. }) => {
+                    self.start(command, tr("Fetch alle Remotes").to_owned());
+                }
+                Some(command) => self.start(command, tr("Pull").to_owned()),
+                None => {}
+            }
+            match clicked {
+                Some(toolbar::Icon::Fetch) => self.start(
+                    Command::Fetch {
+                        remote: None,
+                        prune: false,
+                    },
+                    tr("Fetch alle Remotes").to_owned(),
+                ),
+                Some(toolbar::Icon::Pull) => self.start(
+                    Command::Pull(gitcraft_git::PullMode::FastForward),
+                    tr("Pull").to_owned(),
+                ),
                 Some(toolbar::Icon::Undo) => self.undo_prompt = Some(false),
                 Some(toolbar::Icon::Redo) => self.undo_prompt = Some(true),
                 Some(toolbar::Icon::Branch) => self.new_branch_here(),
@@ -1424,6 +1583,14 @@ impl RepoWindow {
                     if open.clicked() {
                         self.pick_folder(&ctx);
                     }
+                }
+                if let Some(running) = &self.running {
+                    if running.show(ui, t)
+                        && let Some(session) = &self.session
+                    {
+                        session.cancel(running.id);
+                    }
+                    return;
                 }
                 let busy = match &self.opening {
                     Some((p, _)) => Some(trf("Öffne {pfad} …", &[("pfad", &shown_path(p))])),
@@ -2747,6 +2914,19 @@ fn error_text(e: &GitError) -> String {
             &[("url", &escape(url)), ("grund", &tr(remotes::problem_text(problem)))],
         ),
         GitError::NoCredentialHelper => tr("Git hat keinen Credential-Helper eingerichtet; die Zugangsdaten bleiben in der URL. Richte einen ein (zum Beispiel den Schlüsselbund des Systems mit git config --global credential.helper …) und versuche es noch einmal.").to_owned(),
+        GitError::NoUpstream => tr("Der Branch hat keinen Upstream. Lege ihn in der Seitenleiste fest oder pushe den Branch zuerst.").to_owned(),
+        GitError::Diverged { ahead, behind } => trf(
+            "Vorspulen ist nicht möglich (eigene Commits: {eigene}, neue vom Remote: {neue}). Wähle Merge oder Rebase.",
+            &[("eigene", ahead), ("neue", behind)],
+        ),
+        GitError::MergeConflicts(message) => trf(
+            "Der Pull hat Konflikte hinterlassen; Merge oder Rebase laufen noch. Löse die Konflikte in der Änderungsliste. ({meldung})",
+            &[("meldung", &escape(message))],
+        ),
+        GitError::Auth(message) => trf(
+            "Anmeldung beim Remote fehlgeschlagen: {meldung}",
+            &[("meldung", &escape(message))],
+        ),
         GitError::WouldOverwrite(files) => trf(
             "Der Wechsel würde lokale Änderungen überschreiben: {dateien}",
             &[("dateien", &escape(&files.join(", ")))],

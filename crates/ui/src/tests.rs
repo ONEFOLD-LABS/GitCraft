@@ -382,7 +382,12 @@ fn texts_behind_variables_are_translated() {
         "Remote entfernen?",
         "Zugangsdaten aus der URL nehmen",
         "Unverschlüsselt: Daten (und Zugangsdaten) gehen im Klartext über das Netz.",
+        "Vorspulen nicht möglich",
+        "Pull (nur Vorspulen)",
+        "Pull mit Merge",
+        "Pull mit Rebase",
     ]);
+    texts.extend(network::PHASES);
     texts.extend(
         [
             gitcraft_git::UrlProblem::Empty,
@@ -1675,4 +1680,105 @@ fn render_remotes() {
     }
     shot("remotes-dark", ThemePreference::Dark, f.window());
     shot("remotes-light", ThemePreference::Light, f.window());
+}
+
+/// Runs git in `dir` (outside the repository) with the fixture's isolated configuration.
+fn git_in(f: &Fixture, dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", f.tmp.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@invalid")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The repository pushed to a bare `up.git`, and a second clone `other` of it.
+fn fixture_with_remote() -> Fixture {
+    let f = Fixture::new();
+    f.write("a.txt", "1\n");
+    f.commit_all("Anfang");
+    let up = f.tmp.path().join("up.git");
+    git_in(
+        &f,
+        f.tmp.path(),
+        &["init", "-q", "--bare", "-b", "main", up.to_str().unwrap()],
+    );
+    assert!(f.git(&["remote", "add", "origin", up.to_str().unwrap()]));
+    assert!(f.git(&["push", "-q", "-u", "origin", "main"]));
+    git_in(
+        &f,
+        f.tmp.path(),
+        &["clone", "-q", up.to_str().unwrap(), "other"],
+    );
+    assert!(f.git(&["config", "user.name", "Test"]));
+    assert!(f.git(&["config", "user.email", "test@invalid"]));
+    f
+}
+
+fn push_from_other(f: &Fixture, file: &str) {
+    let other = f.tmp.path().join("other");
+    fs::write(other.join(file), file).unwrap();
+    git_in(f, &other, &["add", "-A"]);
+    git_in(f, &other, &["commit", "-q", "-m", file]);
+    git_in(f, &other, &["push", "-q", "origin", "HEAD"]);
+}
+
+/// Fetch names what came in; Pull fast-forwards; when both sides moved on, the dialog explains
+/// it and merges only on request.
+#[test]
+fn fetch_and_pull_from_the_toolbar() {
+    crate::i18n::set_language(crate::i18n::Language::German);
+    let f = fixture_with_remote();
+    push_from_other(&f, "b.txt");
+    push_from_other(&f, "c.txt");
+    let mut h = harness(f.window());
+    h.get_by_label("Fetch").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    let notice = h.state().notice.clone().map(|(text, _)| text);
+    assert_eq!(
+        notice.as_deref(),
+        Some("Fetch fertig: origin/main +2 Commits.")
+    );
+    h.get_by_label("Pull").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert!(f.repo().join("c.txt").exists());
+
+    push_from_other(&f, "d.txt");
+    f.write("e.txt", "lokal");
+    f.commit_all("lokal");
+    h.state_mut().refresh();
+    settle(&mut h);
+    h.get_by_label("Pull").click();
+    settle(&mut h);
+    h.get_by_label("Vorspulen nicht möglich");
+    assert!(!f.repo().join("d.txt").exists(), "nothing changed yet");
+    h.get_by_label("Mergen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert!(f.repo().join("d.txt").exists() && f.repo().join("e.txt").exists());
+}
+
+#[test]
+fn render_diverged_pull() {
+    let f = fixture_with_remote();
+    let mut w = f.window();
+    w.remote_dialog = Some(remotes::Dialog::Diverged {
+        branch: "main".into(),
+        upstream: "origin/main".into(),
+        ahead: 1,
+        behind: 2,
+    });
+    shot("diverged-dark", ThemePreference::Dark, w);
 }

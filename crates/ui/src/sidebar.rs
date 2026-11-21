@@ -40,6 +40,7 @@ pub(crate) enum Pick {
     },
     DropStash(Stash),
     AddRemote,
+    Fetch(String),
     EditRemote(String),
     RenameRemote(String),
     RemoveRemote(String),
@@ -330,6 +331,9 @@ fn remote_hover(remote: &Remote) -> String {
 
 fn remote_menu(ui: &mut egui::Ui, remote: &Remote) -> Option<Pick> {
     let mut picked = None;
+    if ui.button(tr("Fetch")).clicked() {
+        picked = Some(Pick::Fetch(remote.name.clone()));
+    }
     if ui.button(tr("URL bearbeiten …")).clicked() {
         picked = Some(Pick::EditRemote(remote.name.clone()));
     }
