@@ -418,3 +418,31 @@ Deltas auflösen	Resolving deltas
 Objekte senden	Writing objects
 Dateien aktualisieren	Updating files
 Dateien auschecken	Checking out files
+Alle Tags pushen	Push all tags
+Commits zum Upstream hochladen (Rechtsklick: Force-Push mit Lease, Tags)	Push commits to the upstream (right click: force push with lease, tags)
+Den Branch zum ersten Mal hochladen; setzt seinen Upstream	Push the branch for the first time; sets its upstream
+Der Remote hat Commits auf {branch}, die dir lokal fehlen; ein normaler Push würde sie überschreiben und wurde abgelehnt. Nichts wurde geändert.	The remote has commits on {branch} that you do not have locally; a normal push would overwrite them and was rejected. Nothing was changed.
+Der Remote hat den Push abgelehnt: {was}	The remote rejected the push: {was}
+Ersetzt {ziel} durch deinen Stand. Diese {n} Commits verschwinden vom Remote:	Replaces {ziel} with your state. These {n} commits disappear from the remote:
+Ersetzt {ziel} durch deinen Stand. Dieser Commit verschwindet vom Remote:	Replaces {ziel} with your state. This commit disappears from the remote:
+Ersetzt {ziel} durch deinen Stand. Nach dem letzten Fetch geht dort kein Commit verloren.	Replaces {ziel} with your state. As of the last fetch no commit is lost there.
+Force-Push mit Lease …	Force push with lease …
+Force-Push …	Force push …
+HEAD ist auf keinem Branch	HEAD is not on a branch
+Hole sie zuerst mit Pull und pushe dann noch einmal. Ein Force-Push ersetzt den Stand auf dem Remote durch deinen.	Get them with pull first, then push again. A force push replaces the remote's state with yours.
+Nach {remote}/{branch} pushen	Push to {remote}/{branch}
+Nur solange der Remote noch bei {id} steht: Kam seitdem etwas dazu, bricht der Push ab, ohne etwas zu überschreiben.	Only while the remote is still at {id}: if anything arrived since, the push stops without overwriting anything.
+Nur solange es den Branch auf dem Remote nicht gibt: Entsteht er seitdem, bricht der Push ab.	Only while the branch does not exist on the remote: if it appears meanwhile, the push stops.
+Prüfe, was auf dem Remote verloren ginge …	Checking what would be lost on the remote …
+Push fertig.	Push done.
+Push: schon aktuell.	Push: already up to date.
+Tag pushen	Push tag
+Tag {name} pushen	Push tag {name}
+{branch} gibt es auf dem Remote noch nicht. Der Push legt ihn dort an und setzt ihn als Upstream, so dass Pull und Push danach wissen, wohin.	{branch} does not exist on the remote yet. The push creates it there and sets it as upstream, so that pull and push know where to go afterwards.
+{ref}: der Remote hat Commits, die lokal fehlen (erst Pull)	{ref}: the remote has commits that are missing locally (pull first)
+{ref}: der Remote hat sich seit der Anzeige geändert; nichts wurde überschrieben (Fetch und neu prüfen)	{ref}: the remote changed since it was shown; nothing was overwritten (fetch and check again)
+{ref}: {grund}	{ref}: {grund}
+Überschreiben	Overwrite
+Branch zum ersten Mal hochladen	Push the branch for the first time
+Push abgelehnt	Push rejected
+Force-Push?	Force push?

@@ -383,6 +383,9 @@ fn texts_behind_variables_are_translated() {
         "Zugangsdaten aus der URL nehmen",
         "Unverschlüsselt: Daten (und Zugangsdaten) gehen im Klartext über das Netz.",
         "Vorspulen nicht möglich",
+        "Branch zum ersten Mal hochladen",
+        "Push abgelehnt",
+        "Force-Push?",
         "Pull (nur Vorspulen)",
         "Pull mit Merge",
         "Pull mit Rebase",
@@ -1781,4 +1784,79 @@ fn render_diverged_pull() {
         behind: 2,
     });
     shot("diverged-dark", ThemePreference::Dark, w);
+}
+
+fn up_tip(f: &Fixture, rev: &str) -> String {
+    let out = Command::new("git")
+        .current_dir(f.tmp.path().join("up.git"))
+        .args(["rev-parse", "--verify", "--quiet", rev])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn local_head(f: &Fixture) -> String {
+    let out = Command::new("git")
+        .current_dir(f.repo())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The first push asks where to and sets the upstream; a rejected push is explained, and a
+/// force push names the remote commits it removes before it runs.
+#[test]
+fn push_first_rejected_and_forced() {
+    crate::i18n::set_language(crate::i18n::Language::German);
+    let f = fixture_with_remote();
+    assert!(f.git(&["switch", "-q", "-c", "neu"]));
+    f.write("n.txt", "n");
+    f.commit_all("neu");
+    let mut h = harness(f.window());
+    h.get_by_label("Push").click();
+    settle(&mut h);
+    h.get_by_label("Nach origin/neu pushen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(up_tip(&f, "neu"), local_head(&f));
+
+    assert!(f.git(&["switch", "-q", "main"]));
+    push_from_other(&f, "fremd.txt");
+    f.write("eigen.txt", "e");
+    f.commit_all("eigen");
+    h.state_mut().refresh();
+    settle(&mut h);
+    h.get_by_label("Push").click();
+    settle(&mut h);
+    h.get_by_label("Push abgelehnt");
+    h.get_by_label("Force-Push …").click();
+    settle(&mut h);
+    h.get_by_label("Force-Push?");
+    h.get_by_label_contains("Dieser Commit verschwindet vom Remote");
+    h.get_by_label("Überschreiben").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(up_tip(&f, "main"), local_head(&f));
+}
+
+#[test]
+fn render_force_push() {
+    let f = fixture_with_remote();
+    let mut w = f.window();
+    let id = w.history.commits()[0].id.clone();
+    w.remote_dialog = Some(remotes::Dialog::Force {
+        info: Some((
+            "origin/main".into(),
+            Some(id.clone()),
+            gitcraft_git::Loss {
+                commits: vec![gitcraft_git::LostCommit {
+                    id,
+                    subject: "Fremde Änderung".into(),
+                }],
+                total: 1,
+            },
+        )),
+    });
+    shot("force-push-light", ThemePreference::Light, w);
 }

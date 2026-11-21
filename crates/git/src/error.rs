@@ -57,6 +57,8 @@ pub enum GitError {
     /// A pull stopped with conflicts; the merge or rebase is in progress (git's report,
     /// credentials hidden).
     MergeConflicts(String),
+    /// The remote refused these refs (remote ref name, why); nothing else went wrong.
+    PushRejected(Vec<(String, crate::Rejection)>),
     /// The remote refused the login or none could be given (git's report, credentials
     /// hidden).
     Auth(String),
@@ -132,6 +134,7 @@ impl fmt::Display for GitError {
                 "the branch and its upstream have diverged ({ahead} ahead, {behind} behind)"
             ),
             GitError::MergeConflicts(_) => write!(f, "the pull stopped with conflicts"),
+            GitError::PushRejected(refs) => write!(f, "the remote rejected {refs:?}"),
             GitError::Auth(e) => write!(f, "authentication failed: {e}"),
             GitError::NoCredentialHelper => write!(f, "no credential helper is configured"),
             GitError::UnsafePath(p) => write!(f, "refused path {p}"),

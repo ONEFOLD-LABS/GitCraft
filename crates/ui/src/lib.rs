@@ -338,6 +338,44 @@ impl RepoWindow {
         false
     }
 
+    /// Push: to the upstream, or the first time after asking where to.
+    fn push(&mut self) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        if snapshot.status.upstream.is_some() {
+            self.start(
+                Command::Push {
+                    remote: None,
+                    lease: None,
+                },
+                tr("Push").to_owned(),
+            );
+            return;
+        }
+        let remotes: Vec<String> = snapshot.remotes.iter().map(|r| r.name.clone()).collect();
+        if let Some(chosen) = default_remote(&snapshot.remotes) {
+            self.remote_dialog = Some(remotes::Dialog::FirstPush {
+                branch: branch_name(&snapshot.status.head),
+                remotes,
+                chosen,
+            });
+        }
+    }
+
+    /// A forced push: fetches first (so that the confirmation names what is on the remote
+    /// now), then reads what it would remove; the dialog waits meanwhile.
+    fn force_push(&mut self) {
+        self.remote_dialog = Some(remotes::Dialog::Force { info: None });
+        self.start(
+            Command::Fetch {
+                remote: None,
+                prune: false,
+            },
+            tr("Fetch alle Remotes").to_owned(),
+        );
+    }
+
     /// Starts a fetch or pull whose progress the toolbar shows.
     fn start(&mut self, command: Command, title: String) {
         let Some(session) = &self.session else {
@@ -616,7 +654,25 @@ impl RepoWindow {
             }
             (Command::Fetch { .. }, Ok(Outcome::Fetched(updates))) => {
                 self.error = None;
-                self.notice = Some((network::fetch_summary(&updates), None));
+                if matches!(
+                    self.remote_dialog,
+                    Some(remotes::Dialog::Force { info: None })
+                ) {
+                    if let Some(session) = &self.session {
+                        session.submit(Command::PushInfo(None));
+                    }
+                } else {
+                    self.notice = Some((network::fetch_summary(&updates), None));
+                }
+            }
+            (Command::Fetch { .. }, Err(e))
+                if matches!(
+                    self.remote_dialog,
+                    Some(remotes::Dialog::Force { info: None })
+                ) =>
+            {
+                self.remote_dialog = None;
+                self.error = Some(error_text(&e));
             }
             (Command::Pull(_), Ok(Outcome::Pulled { before, after, .. })) => {
                 self.error = None;
@@ -626,6 +682,42 @@ impl RepoWindow {
                     tr("Pull fertig.")
                 };
                 self.notice = Some((text.to_owned(), None));
+            }
+            (Command::PushInfo(_), Ok(Outcome::PushInfo(target, loss))) => {
+                if let Some(remotes::Dialog::Force { info }) = self.remote_dialog.as_mut() {
+                    let branch = target
+                        .merge
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&target.merge);
+                    *info = Some((format!("{}/{branch}", target.remote), target.tracking, loss));
+                }
+            }
+            (Command::PushInfo(_), Err(e)) => {
+                self.remote_dialog = None;
+                self.error = Some(error_text(&e));
+            }
+            (Command::Push { .. } | Command::PushTags { .. }, Ok(Outcome::Pushed(refs))) => {
+                self.error = None;
+                let text = if refs
+                    .iter()
+                    .all(|r| r.flag == gitcraft_git::PushFlag::UpToDate)
+                {
+                    tr("Push: schon aktuell.")
+                } else {
+                    tr("Push fertig.")
+                };
+                self.notice = Some((text.to_owned(), None));
+            }
+            (Command::Push { lease: None, .. }, Err(GitError::PushRejected(refs)))
+                if refs
+                    .iter()
+                    .any(|(_, why)| *why == gitcraft_git::Rejection::NonFastForward) =>
+            {
+                let branch = self
+                    .status()
+                    .map(|s| branch_name(&s.head))
+                    .unwrap_or_default();
+                self.remote_dialog = Some(remotes::Dialog::Rejected { branch });
             }
             (Command::Pull(_), Err(GitError::Diverged { ahead, behind })) => {
                 let (branch, upstream) = self
@@ -1005,6 +1097,18 @@ impl RepoWindow {
                         self.branch_dialog = Some(branches::Dialog::Delete { name, loss: None });
                     }
                     Some(Pick::AddRemote) => self.remote_dialog = Some(remotes::Dialog::add()),
+                    Some(Pick::PushTag(tag)) => {
+                        if let Some(remote) = default_remote(remotes) {
+                            let title = trf("Tag {name} pushen", &[("name", &escape(&tag))]);
+                            self.start(
+                                Command::PushTags {
+                                    remote,
+                                    tag: Some(tag),
+                                },
+                                title,
+                            );
+                        }
+                    }
                     Some(Pick::Fetch(name)) => {
                         let title = trf("Fetch {name}", &[("name", &escape(&name))]);
                         self.start(
@@ -1428,6 +1532,21 @@ impl RepoWindow {
                     }
                     .to_owned(),
                 ));
+                let on_branch = matches!(self.status().map(|s| &s.head), Some(Head::Branch { .. }));
+                known.push((
+                    toolbar::Icon::Push,
+                    remotes && on_branch && !busy,
+                    if !remotes {
+                        tr("Kein Remote eingerichtet")
+                    } else if !on_branch {
+                        tr("HEAD ist auf keinem Branch")
+                    } else if upstream {
+                        tr("Commits zum Upstream hochladen (Rechtsklick: Force-Push mit Lease, Tags)")
+                    } else {
+                        tr("Den Branch zum ersten Mal hochladen; setzt seinen Upstream")
+                    }
+                    .to_owned(),
+                ));
                 known.push((toolbar::Icon::Branch, true, tr("Neuer Branch").to_owned()));
                 let dirty = self.status().is_some_and(|s| !s.is_clean());
                 known.push((
@@ -1481,6 +1600,21 @@ impl RepoWindow {
                         }
                     });
                 }
+                toolbar::Icon::Push => {
+                    resp.context_menu(|ui| {
+                        if ui.button(tr("Force-Push mit Lease …")).clicked() {
+                            chosen = Some(Command::PushInfo(None));
+                            ui.close();
+                        }
+                        if ui.button(tr("Alle Tags pushen")).clicked() {
+                            chosen = Some(Command::PushTags {
+                                remote: String::new(),
+                                tag: None,
+                            });
+                            ui.close();
+                        }
+                    });
+                }
                 toolbar::Icon::Pull => {
                     resp.context_menu(|ui| {
                         for (label, mode) in [
@@ -1502,6 +1636,19 @@ impl RepoWindow {
                 Some(command @ Command::Fetch { .. }) => {
                     self.start(command, tr("Fetch alle Remotes").to_owned());
                 }
+                Some(Command::PushInfo(_)) => self.force_push(),
+                Some(Command::PushTags { tag, .. }) => {
+                    let remote = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| default_remote(&s.remotes));
+                    if let Some(remote) = remote {
+                        self.start(
+                            Command::PushTags { remote, tag },
+                            tr("Alle Tags pushen").to_owned(),
+                        );
+                    }
+                }
                 Some(command) => self.start(command, tr("Pull").to_owned()),
                 None => {}
             }
@@ -1513,6 +1660,7 @@ impl RepoWindow {
                     },
                     tr("Fetch alle Remotes").to_owned(),
                 ),
+                Some(toolbar::Icon::Push) => self.push(),
                 Some(toolbar::Icon::Pull) => self.start(
                     Command::Pull(gitcraft_git::PullMode::FastForward),
                     tr("Pull").to_owned(),
@@ -1764,6 +1912,16 @@ impl RepoWindow {
         };
         let t = theme::tokens(ctx);
         match dialog.show(ctx, t) {
+            branches::Decision::Run(Command::PushInfo(_)) => self.force_push(),
+            branches::Decision::Run(command @ (Command::Push { .. } | Command::Pull(_))) => {
+                self.remote_dialog = None;
+                let title = if matches!(command, Command::Pull(_)) {
+                    tr("Pull")
+                } else {
+                    tr("Push")
+                };
+                self.start(command, title.to_owned());
+            }
             branches::Decision::Run(command) => {
                 self.remote_dialog = None;
                 self.write(command);
@@ -2850,6 +3008,15 @@ fn rows(status: &Status) -> Vec<Row> {
     out
 }
 
+/// The remote GitCraft offers first: `origin`, else the first configured one.
+fn default_remote(remotes: &[gitcraft_git::Remote]) -> Option<String> {
+    remotes
+        .iter()
+        .find(|r| r.name == "origin")
+        .or(remotes.first())
+        .map(|r| r.name.clone())
+}
+
 /// The message for a git error, in the UI language.
 fn error_text(e: &GitError) -> String {
     match e {
@@ -2923,6 +3090,29 @@ fn error_text(e: &GitError) -> String {
             "Der Pull hat Konflikte hinterlassen; Merge oder Rebase laufen noch. Löse die Konflikte in der Änderungsliste. ({meldung})",
             &[("meldung", &escape(message))],
         ),
+        GitError::PushRejected(refs) => {
+            let parts: Vec<String> = refs
+                .iter()
+                .map(|(name, why)| {
+                    let name = escape(name.strip_prefix("refs/heads/").unwrap_or(name));
+                    match why {
+                        gitcraft_git::Rejection::NonFastForward => trf(
+                            "{ref}: der Remote hat Commits, die lokal fehlen (erst Pull)",
+                            &[("ref", &name)],
+                        ),
+                        gitcraft_git::Rejection::Stale => trf(
+                            "{ref}: der Remote hat sich seit der Anzeige geändert; nichts wurde überschrieben (Fetch und neu prüfen)",
+                            &[("ref", &name)],
+                        ),
+                        gitcraft_git::Rejection::Remote(reason) | gitcraft_git::Rejection::Other(reason) => trf(
+                            "{ref}: {grund}",
+                            &[("ref", &name), ("grund", &escape(reason))],
+                        ),
+                    }
+                })
+                .collect();
+            trf("Der Remote hat den Push abgelehnt: {was}", &[("was", &parts.join("; "))])
+        }
         GitError::Auth(message) => trf(
             "Anmeldung beim Remote fehlgeschlagen: {meldung}",
             &[("meldung", &escape(message))],

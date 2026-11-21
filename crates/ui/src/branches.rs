@@ -120,7 +120,7 @@ pub(crate) fn name_hint(name: &str) -> Option<&'static str> {
     }
 }
 
-fn loss_list(ui: &mut egui::Ui, t: &Tokens, loss: &Loss) {
+pub(crate) fn loss_list(ui: &mut egui::Ui, t: &Tokens, loss: &Loss) {
     for c in loss.commits.iter().take(LISTED) {
         ui.label(RichText::new(format!("{}  {}", c.id.short(), escape(&c.subject))).monospace());
     }
@@ -132,7 +132,7 @@ fn loss_list(ui: &mut egui::Ui, t: &Tokens, loss: &Loss) {
     }
 }
 
-fn danger(t: &Tokens, label: &str) -> egui::Button<'static> {
+pub(crate) fn danger(t: &Tokens, label: &str) -> egui::Button<'static> {
     egui::Button::new(RichText::new(label.to_owned()).color(t.error_text)).fill(t.error_bg)
 }
 

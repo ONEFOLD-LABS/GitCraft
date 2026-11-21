@@ -284,6 +284,38 @@ impl GitRunner {
         })
     }
 
+    /// Like [`GitRunner::write_progress`], but a failed exit is not an error: returns the
+    /// output and whether git succeeded (`push --porcelain` explains rejections on stdout).
+    pub(crate) fn write_progress_any<I, S>(
+        &self,
+        cwd: &Path,
+        args: I,
+        cancel: &Cancel,
+        on_progress: OnProgress,
+    ) -> Result<(Written, bool), GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancel.is_cancelled() {
+            return Err(GitError::Cancelled);
+        }
+        let (child, call) = self.spawn(cwd, &[], args, Mode::Write, false, &[])?;
+        let out = collect_any(
+            child,
+            &call,
+            None,
+            None,
+            Some(cancel.clone()),
+            Some(on_progress),
+        )?;
+        let written = Written {
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).trim_end().to_owned(),
+        };
+        Ok((written, out.success))
+    }
+
     /// Starts a read whose output is consumed record by record ([`GitStream`]), e.g. a long
     /// history. No timeout: the consumer sets the pace; dropping the stream stops git.
     pub fn stream<I, S>(
@@ -479,13 +511,30 @@ fn kill(child: &mut Child) {
 /// own thread so that no pipe can block git), waits for git, records the call and maps
 /// failures. A watchdog stops git after `timeout` or when `cancel` is set.
 fn collect(
-    mut child: Child,
+    child: Child,
     call: &Call,
     input: Option<Vec<u8>>,
     timeout: Option<Duration>,
     cancel: Option<Cancel>,
     on_progress: Option<OnProgress>,
 ) -> Result<(Vec<u8>, Vec<u8>), GitError> {
+    let out = collect_any(child, call, input, timeout, cancel, on_progress)?;
+    if out.success {
+        return Ok((out.stdout, out.stderr));
+    }
+    Err(failure(out.code, &out.stderr, &call.command, &call.cwd))
+}
+
+/// Like [`collect`], but an unsuccessful exit is returned as output (for commands whose
+/// stdout explains the failure, like `push --porcelain`).
+fn collect_any(
+    mut child: Child,
+    call: &Call,
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    cancel: Option<Cancel>,
+    on_progress: Option<OnProgress>,
+) -> Result<Collected, GitError> {
     let feeder = match (child.stdin.take(), input) {
         (Some(mut pipe), Some(bytes)) => Some(std::thread::spawn(move || {
             // git may exit without reading everything (an error); the broken pipe is fine.
@@ -549,10 +598,7 @@ fn collect(
             limit: MAX_STDOUT,
         });
     }
-    if out.success {
-        return Ok((out.stdout, out.stderr));
-    }
-    Err(failure(out.code, &out.stderr, &call.command, &call.cwd))
+    Ok(out)
 }
 
 struct Collected {

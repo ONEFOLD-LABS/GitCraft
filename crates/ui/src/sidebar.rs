@@ -41,6 +41,7 @@ pub(crate) enum Pick {
     DropStash(Stash),
     AddRemote,
     Fetch(String),
+    PushTag(String),
     EditRemote(String),
     RenameRemote(String),
     RemoveRemote(String),
@@ -382,6 +383,9 @@ fn ref_menu(ui: &mut egui::Ui, r: &Ref) -> Option<Pick> {
             target: r.full_name.clone(),
             label: r.name.clone(),
         });
+    }
+    if r.kind == RefKind::Tag && ui.button(tr("Tag pushen")).clicked() {
+        picked = Some(Pick::PushTag(r.name.clone()));
     }
     if r.kind == RefKind::Tag && ui.button(tr("Löschen …")).clicked() {
         picked = Some(Pick::DeleteTag(r.name.clone()));

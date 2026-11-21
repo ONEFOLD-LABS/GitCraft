@@ -101,8 +101,10 @@ drop, force push, worktree removal with changes:
 - Where possible a way back is kept: discarded file contents are written as blobs to the
   object database and listed under "Recently discarded" for a while; dropped stashes and
   deleted branches show the commit id to restore them.
-- Force push is always `--force-with-lease` (with `--force-if-includes`); plain `--force` is
-  not offered.
+- Force push is always `--force-with-lease=<ref>:<commit>` on exactly the remote commit the
+  confirmation showed (GitCraft fetches before asking), so commits that reached the remote since
+  are never overwritten; plain `--force` is not offered. (`--force-if-includes` guards against
+  background fetches when the lease names no commit; with an explicit commit git ignores it.)
 - Nothing destructive runs from a keyboard shortcut without the confirmation.
 
 ### Logging and privacy

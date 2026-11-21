@@ -150,7 +150,7 @@ impl Repository {
         self.loss(&["HEAD", "--not", "--branches", "--remotes", "--tags"])
     }
 
-    fn loss(&self, revs: &[&str]) -> Result<Loss, GitError> {
+    pub(crate) fn loss(&self, revs: &[&str]) -> Result<Loss, GitError> {
         // `revs` are built here (checked names as `refs/heads/…`, `HEAD`) and mix revisions
         // with `--not`/`--branches`, so no `--end-of-options`.
         let mut args: Vec<&str> = vec!["log", "--no-color", "--format=%H%x1f%s"];
