@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::ThemePreference;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use gitcraft_git::{GitRunner, Repository};
 
 use super::*;
@@ -300,6 +301,18 @@ fn texts_behind_variables_are_translated() {
         "Tags",
     ];
     texts.extend(toolbar::ACTIONS.map(|(_, label, _)| label));
+    texts.extend(search::Kind::ALL.map(search::Kind::label));
+    texts.extend([
+        "Repository öffnen",
+        "Status neu lesen",
+        "Historie durchsuchen",
+        "Nächster / vorheriger Treffer",
+        "Commit wählen",
+        "Commit-ID kopieren",
+        "Diff oder Suche schließen",
+        "Zoom",
+        "Diese Übersicht",
+    ]);
     texts.extend(
         [
             C::BothModified,
@@ -407,6 +420,9 @@ fn history_with_branches_labels_and_keyboard() {
     let mut w = f.window();
     w.select_commit(head);
     shot("history-commit-dark", ThemePreference::Dark, w);
+    let mut w = f.window();
+    w.show_keys = true;
+    shot("keys-light", ThemePreference::Light, w);
 }
 
 /// The settings window explains what the avatar switch sends; switching it saves the file and
@@ -548,4 +564,79 @@ fn work_in_progress_rows_open_their_diffs() {
             ..
         })
     ));
+}
+
+/// A search dims the other commits, jumps to the first match, and F3-style navigation wraps
+/// around; commit ids are matched by prefix without git.
+#[test]
+fn history_search_marks_and_jumps() {
+    let f = Fixture::new();
+    for (i, s) in [
+        "Parser anlegen",
+        "Plan schreiben",
+        "Parser testen",
+        "Aufräumen",
+    ]
+    .iter()
+    .enumerate()
+    {
+        f.write("a.txt", &i.to_string());
+        f.commit_all(s);
+    }
+    let mut w = f.window();
+    let ctx = egui::Context::default();
+    w.search.open();
+    w.search.set_for_test(Some("parser"), None);
+    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.search.is_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        w.collect(&ctx);
+    }
+    w.collect(&ctx);
+    let subjects = |w: &RepoWindow| match &w.selection {
+        Selection::Commit(id) => w.history.commit(id).unwrap().subject.clone(),
+        _ => String::new(),
+    };
+    assert_eq!(w.match_position(), (Some(1), 2));
+    assert_eq!(
+        subjects(&w),
+        "Parser testen",
+        "jumped to the first (newest) match"
+    );
+    w.jump(true);
+    assert_eq!(subjects(&w), "Parser anlegen");
+    w.jump(true);
+    assert_eq!(subjects(&w), "Parser testen", "wraps around");
+    w.jump(false);
+    assert_eq!(subjects(&w), "Parser anlegen");
+    shot("search-dark", ThemePreference::Dark, w);
+
+    let mut w = f.window();
+    let prefix = w.history.commits()[3].id.short().to_owned();
+    w.search.open();
+    w.search.set_for_test(Some(&prefix), Some(search::Kind::Id));
+    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    w.collect_search_now();
+    assert_eq!(subjects(&w), "Parser anlegen");
+    w.search.close();
+    assert!(!w.search.active());
+}
+
+/// The help window (F1) links to the donation page.
+#[test]
+fn help_window_opens_the_donation_page() {
+    let mut w = RepoWindow::new(GitRunner::with_program("/nonexistent/git"), None);
+    w.show_keys = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 640.0))
+        .build_ui(move |ui| w.ui(ui));
+    harness.run_steps(2);
+    harness.get_by_label("GitCraft unterstützen …").click();
+    harness.step();
+    let opened =
+        harness.output().platform_output.commands.iter().any(
+            |c| matches!(c, egui::OutputCommand::OpenUrl(u) if u.url == SPONSOR_URL && u.new_tab),
+        );
+    assert!(opened, "the donation page was not opened");
 }

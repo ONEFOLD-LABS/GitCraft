@@ -27,6 +27,9 @@ const HEADER_H: f32 = 22.0;
 const MAX_LANES: usize = 24;
 const REFS_W: f32 = 170.0;
 const DATE_W: f32 = 76.0;
+const AUTHOR_W: f32 = 140.0;
+/// Below this row width the author column is left out, so the message keeps its room.
+const AUTHOR_MIN_ROW: f32 = 760.0;
 
 /// Reads pages of the log on its own thread, one page per request. Dropping it ends the thread
 /// (and with it `git log`).
@@ -178,8 +181,20 @@ impl History {
         self.index.get(id).copied()
     }
 
+    /// The lane colour index of a loaded commit (sidebar dots).
+    pub(crate) fn color_of(&self, id: &Oid) -> Option<usize> {
+        self.position(id)
+            .and_then(|i| self.rows.get(i))
+            .map(|r| r.color)
+    }
+
     pub(crate) fn commit(&self, id: &Oid) -> Option<&Commit> {
         self.position(id).and_then(|i| self.commits.get(i))
+    }
+
+    /// Asks for the next page (e.g. while looking for further search matches).
+    pub(crate) fn load_more(&mut self) {
+        self.request();
     }
 
     /// Brings display row `row` into view at the next frame.
@@ -242,6 +257,8 @@ pub(crate) struct WipCounts {
 pub(crate) struct View<'a> {
     pub labels: &'a Labels,
     pub avatars: &'a crate::avatars::Avatars,
+    /// An active search dims the commits that do not match.
+    pub search: Option<&'a crate::search::Search>,
     pub wip: Option<WipCounts>,
     pub head: Option<&'a Oid>,
     pub now: i64,
@@ -497,6 +514,15 @@ impl History {
             FontId::proportional(14.0),
             t.text,
         );
+        if cols.author.width() > 0.0 {
+            p.with_clip_rect(cols.author).text(
+                pos2(cols.author.left(), mid),
+                egui::Align2::LEFT_CENTER,
+                escape(&commit.author.name),
+                FontId::proportional(13.0),
+                t.text_dim,
+            );
+        }
         let date = relative_date(view.now, commit.author.time);
         p.text(
             pos2(cols.date.right(), mid),
@@ -505,6 +531,11 @@ impl History {
             FontId::proportional(13.0),
             t.text_dim,
         );
+        if let Some(search) = view.search.filter(|s| s.active())
+            && !search.is_match(commit)
+        {
+            p.rect_filled(cols.rect, 0.0, t.panel_bg.gamma_multiply(0.7));
+        }
         let refs: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         let mut text = subject;
         if !refs.is_empty() {
@@ -520,6 +551,7 @@ struct Columns {
     refs: Rect,
     graph: Rect,
     message: Rect,
+    author: Rect,
     date: Rect,
 }
 
@@ -532,15 +564,28 @@ impl Columns {
             pos2(rect.right() - DATE_W - 8.0, rect.top()),
             pos2(rect.right() - 8.0, rect.bottom()),
         );
+        let author_w = if rect.width() >= AUTHOR_MIN_ROW {
+            AUTHOR_W
+        } else {
+            0.0
+        };
+        let author = Rect::from_min_max(
+            pos2(date.left() - 8.0 - author_w, rect.top()),
+            pos2(date.left() - 8.0, rect.bottom()),
+        );
         let message = Rect::from_min_max(
             pos2(graph.right() + 4.0, rect.top()),
-            pos2((date.left() - 8.0).max(graph.right() + 4.0), rect.bottom()),
+            pos2(
+                (author.left() - 8.0).max(graph.right() + 4.0),
+                rect.bottom(),
+            ),
         );
         Columns {
             rect,
             refs,
             graph,
             message,
+            author,
             date,
         }
     }
@@ -658,8 +703,12 @@ fn paint_header(ui: &mut egui::Ui, t: &Tokens, graph_w: f32) {
             tr("Commit-Nachricht"),
             egui::Align2::LEFT_CENTER,
         ),
+        (cols.author, tr("Autor"), egui::Align2::LEFT_CENTER),
         (cols.date, tr("Datum"), egui::Align2::RIGHT_CENTER),
     ] {
+        if area.width() <= 0.0 {
+            continue;
+        }
         let x = if align == egui::Align2::RIGHT_CENTER {
             area.right()
         } else {

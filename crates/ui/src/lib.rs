@@ -9,6 +9,7 @@ mod avatars;
 mod diffview;
 mod history;
 pub mod i18n;
+mod search;
 pub mod settings;
 mod sidebar;
 pub mod theme;
@@ -27,13 +28,21 @@ use crate::avatars::Avatars;
 use crate::diffview::Prepared;
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
+use crate::search::{BarAction, Search};
 use crate::settings::{Loaded, Settings};
-use crate::sidebar::Sidebar;
+use crate::sidebar::{Pick, Sidebar};
 use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
+
+/// The ONEFOLD LABS donation page, linked from the help window (F1).
+const SPONSOR_URL: &str = "https://ko-fi.com/onefoldlabs";
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+const KEYS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
 /// Colour role of a file row; the colour itself comes from the theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +111,13 @@ pub struct RepoWindow {
     selection: Selection,
     details: Option<Details>,
     diff: Option<DiffState>,
+    search: Search,
     sidebar: Sidebar,
     settings: Settings,
     /// Where the settings are saved; `None` keeps them in memory (tests).
     settings_dir: Option<PathBuf>,
     show_settings: bool,
+    show_keys: bool,
     avatars: Avatars,
     error: Option<String>,
     busy: Option<Busy>,
@@ -133,10 +144,12 @@ impl RepoWindow {
             selection: Selection::None,
             details: None,
             diff: None,
+            search: Search::default(),
             sidebar: Sidebar::default(),
             settings: Settings::default(),
             settings_dir: None,
             show_settings: false,
+            show_keys: false,
             avatars: Avatars::off(),
             error: None,
             busy: None,
@@ -239,6 +252,7 @@ impl RepoWindow {
         self.selection = Selection::None;
         self.details = None;
         self.diff = None;
+        self.search.close();
         self.apply(snapshot);
     }
 
@@ -319,6 +333,11 @@ impl RepoWindow {
             }
         }
         self.history.poll();
+        self.search.poll();
+        if self.search.jump_pending && self.first_match().is_some() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
+        }
         // Nothing selected yet: the commit at HEAD once it has loaded.
         if self.selection == Selection::None
             && let Some(head) = self.status().and_then(head_commit)
@@ -355,6 +374,7 @@ impl RepoWindow {
         self.handle_input(&ctx);
         let t = theme::tokens(&ctx);
         self.settings_window(&ctx);
+        self.keys_window(&ctx);
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
         if let Some(error) = &self.error {
@@ -390,8 +410,17 @@ impl RepoWindow {
                     .as_ref()
                     .map(|s| (s.refs.as_slice(), s.stashes.as_slice()))
                     .unwrap_or_default();
-                if let Some(id) = self.sidebar.show(ui, t, refs, stashes) {
-                    self.select_commit(id);
+                let wip = self.wip().map(|w| w.changed + w.staged + w.conflicts);
+                let history = &self.history;
+                let lane = |id: &Oid| history.color_of(id).map(|c| t.lanes[c % t.lanes.len()]);
+                match self.sidebar.show(ui, t, refs, stashes, wip, &lane) {
+                    Some(Pick::Commit(id)) => self.select_commit(id),
+                    Some(Pick::WorkInProgress) => {
+                        self.diff = None;
+                        self.selection = Selection::WorkInProgress;
+                        self.history.scroll_to(0);
+                    }
+                    None => {}
                 }
             });
         egui::Panel::right("details")
@@ -503,11 +532,35 @@ impl RepoWindow {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
-        if self.diff.is_some()
-            && !typing
+        if (self.diff.is_some() || self.search.open)
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
+            // The innermost first: an open diff, then the search.
+            if self.diff.is_some() {
+                self.diff = None;
+            } else {
+                self.search.close();
+            }
+        }
+        let (find, previous, next) = ctx.input_mut(|i| {
+            // Shift+F3 first, so that it does not also count as F3.
+            let find = i.consume_shortcut(&FIND);
+            let previous = i.consume_shortcut(&PREVIOUS);
+            let next = i.consume_shortcut(&NEXT);
+            if i.consume_shortcut(&KEYS) {
+                self.show_keys = !self.show_keys;
+            }
+            (find, previous, next)
+        });
+        if find && self.repo.is_some() {
             self.diff = None;
+            self.search.open();
+        }
+        if next {
+            self.jump(true);
+        }
+        if previous {
+            self.jump(false);
         }
         let in_diff = self.diff.is_some();
         let (open, refresh, copy, focused, dropped, step) = ctx.input_mut(|i| {
@@ -589,43 +642,78 @@ impl RepoWindow {
         let t = theme::tokens(&ctx);
         ui.horizontal(|ui| {
             if let (Some(repo), Some(status)) = (&self.repo, self.status()) {
-                toolbar::caption(
+                let hint = format!(
+                    "{}\n{}",
+                    shown_path(repo.workdir()),
+                    shortcut_hint(&ctx, tr("Anderes Repository öffnen"), &OPEN)
+                );
+                let repo_clicked = toolbar::caption(
                     ui,
                     t,
                     tr("Repository"),
                     &repo_name(repo.workdir()),
-                    &shown_path(repo.workdir()),
-                );
+                    &hint,
+                    true,
+                )
+                .clicked();
                 toolbar::caption(
                     ui,
                     t,
                     tr("Branch"),
                     &branch_name(&status.head),
                     &format!("{} · {}", head_text(&status.head), upstream_text(status)),
+                    false,
                 );
                 ui.separator();
-            }
-            toolbar::coming(ui, t);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let refresh = ui
-                    .add_enabled(
-                        self.repo.is_some() && !self.is_busy(),
-                        egui::Button::new(tr("Aktualisieren")),
-                    )
-                    .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
-                if refresh.clicked() {
-                    self.refresh(&ctx);
+                if repo_clicked {
+                    self.pick_folder(&ctx);
                 }
-                if ui.button(tr("Einstellungen")).clicked() {
+            }
+            let (behind, ahead) = self
+                .status()
+                .and_then(|s| s.upstream.as_ref())
+                .and_then(|u| u.ahead_behind)
+                .map_or((0, 0), |(a, b)| (b, a));
+            toolbar::coming(ui, t, behind, ahead);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if toolbar::button(
+                    ui,
+                    t,
+                    toolbar::Icon::Settings,
+                    tr("Einstellungen"),
+                    true,
+                    None,
+                )
+                .clicked()
+                {
                     self.show_settings = !self.show_settings;
                 }
-                let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
-                    &ctx,
-                    tr("Repository öffnen"),
-                    &OPEN,
-                ));
-                if open.clicked() {
-                    self.pick_folder(&ctx);
+                toolbar::button(ui, t, toolbar::Icon::Commands, tr("Befehle"), false, None)
+                    .on_hover_text(trf("Kommt mit Version {v}", &[("v", &"0.8")]));
+                let search = ui.add_enabled(
+                    self.repo.is_some(),
+                    egui::Button::new(
+                        RichText::new(trf(
+                            "Commits suchen ({taste})",
+                            &[("taste", &ctx.format_shortcut(&FIND))],
+                        ))
+                        .color(t.text_dim),
+                    )
+                    .min_size(egui::vec2(190.0, 26.0)),
+                );
+                if search.clicked() {
+                    self.diff = None;
+                    self.search.open();
+                }
+                if self.repo.is_none() {
+                    let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
+                        &ctx,
+                        tr("Repository öffnen"),
+                        &OPEN,
+                    ));
+                    if open.clicked() {
+                        self.pick_folder(&ctx);
+                    }
                 }
                 if let Some(busy) = &self.busy {
                     let text = match busy {
@@ -672,7 +760,12 @@ impl RepoWindow {
 
     fn status_line(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
+        let zoom = (ui.ctx().zoom_factor() * 100.0).round();
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            if let Some(repo) = &self.repo {
+                ui.add(egui::Label::new(RichText::new(shown_path(repo.workdir())).color(t.text_dim)).truncate());
+                ui.label(RichText::new("·").color(t.text_dim));
+            }
             if let Some(status) = self.status() {
                 let text = trf(
                     "Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}",
@@ -685,26 +778,100 @@ impl RepoWindow {
                 );
                 ui.label(RichText::new(text).color(t.text_dim));
             }
-            if self.repo.is_some() {
-                let n = self.history.commits().len();
-                let text = if self.history.is_loading() {
-                    trf("{n} Commits geladen …", &[("n", &n)])
-                } else {
-                    trf("{n} Commits", &[("n", &n)])
-                };
-                ui.label(RichText::new("·").color(t.text_dim));
-                ui.label(RichText::new(text).color(t.text_dim));
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(v) = self.git_version {
                     ui.label(RichText::new(format!("git {v}")).color(t.text_dim));
+                    ui.label(RichText::new("·").color(t.text_dim));
+                }
+                if ui
+                    .add(egui::Label::new(RichText::new(tr("F1: Tastenkürzel")).color(t.text_dim)).sense(egui::Sense::click()))
+                    .clicked()
+                {
+                    self.show_keys = !self.show_keys;
+                }
+                ui.label(RichText::new("·").color(t.text_dim));
+                ui.label(RichText::new(trf("Zoom {p} %", &[("p", &zoom)])).color(t.text_dim))
+                    .on_hover_text(tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0"));
+                if self.repo.is_some() {
+                    let n = self.history.commits().len();
+                    let text = if self.history.is_loading() {
+                        trf("{n} Commits geladen …", &[("n", &n)])
+                    } else {
+                        trf("{n} Commits", &[("n", &n)])
+                    };
+                    ui.label(RichText::new("·").color(t.text_dim));
+                    ui.label(RichText::new(text).color(t.text_dim));
                 }
             });
         });
     }
 
+    /// The list of keyboard shortcuts (F1).
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_keys;
+        egui::Window::new(tr("Tastenkürzel"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 90.0])
+            .show(ctx, |ui| {
+                let t = theme::tokens(ui.ctx());
+                let f = |s: &KeyboardShortcut| ctx.format_shortcut(s);
+                let rows: Vec<(String, &str)> = vec![
+                    (f(&OPEN), "Repository öffnen"),
+                    (f(&REFRESH), "Status neu lesen"),
+                    (f(&FIND), "Historie durchsuchen"),
+                    (
+                        format!("{} / {}", f(&NEXT), f(&PREVIOUS)),
+                        "Nächster / vorheriger Treffer",
+                    ),
+                    (
+                        tr("Pfeil hoch/runter, Bild hoch/runter, Pos1, Ende").to_owned(),
+                        "Commit wählen",
+                    ),
+                    (f(&COPY), "Commit-ID kopieren"),
+                    ("Esc".to_owned(), "Diff oder Suche schließen"),
+                    (tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0").to_owned(), "Zoom"),
+                    (f(&KEYS), "Diese Übersicht"),
+                ];
+                egui::Grid::new("tastenkuerzel")
+                    .num_columns(2)
+                    .spacing([24.0, 6.0])
+                    .show(ui, |ui| {
+                        for (keys, what) in rows {
+                            ui.label(RichText::new(keys).monospace().color(t.text_strong));
+                            ui.label(tr(what));
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                if ui.link(tr("GitCraft unterstützen …")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(SPONSOR_URL));
+                }
+            });
+        self.show_keys = open;
+    }
+
     fn history_view(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
+        if self.search.open {
+            let (position, count) = self.match_position();
+            let (action, run) = self.search.bar(ui, t, position, count);
+            if let Some(e) = self.search.error() {
+                ui.label(RichText::new(error_text(e)).color(t.error_text));
+            }
+            if run && let Some(repo) = self.repo.clone() {
+                self.search.run(&repo, ui.ctx());
+                self.collect_search_now();
+            }
+            match action {
+                Some(BarAction::Next) => self.jump(true),
+                Some(BarAction::Previous) => self.jump(false),
+                Some(BarAction::Close) => self.search.close(),
+                None => {}
+            }
+            ui.add_space(2.0);
+        }
         if let Some(e) = self.history.error() {
             ui.label(RichText::new(error_text(e)).color(t.error_text));
         }
@@ -730,6 +897,7 @@ impl RepoWindow {
         let view = View {
             labels: &self.labels,
             avatars: &self.avatars,
+            search: Some(&self.search),
             wip,
             head: head.as_ref(),
             now,
@@ -849,7 +1017,12 @@ impl RepoWindow {
             ui.add_space(8.0);
         }
         ui.label(
-            RichText::new(trf("{n} Dateien geändert", &[("n", &files.len())])).color(t.text_strong),
+            RichText::new(if files.len() == 1 {
+                tr("1 Datei geändert").to_owned()
+            } else {
+                trf("{n} Dateien geändert", &[("n", &files.len())])
+            })
+            .color(t.text_strong),
         );
         let current = self.diff.as_ref().map(|s| s.key.clone());
         let mut open = None;
@@ -945,6 +1118,74 @@ impl RepoWindow {
         if let Some((key, title)) = open {
             let ctx = ui.ctx().clone();
             self.open_diff(key, title, &ctx);
+        }
+    }
+
+    /// Commit indices (in the loaded history) that match the active search.
+    fn match_indices(&self) -> Vec<usize> {
+        if !self.search.active() {
+            return Vec::new();
+        }
+        self.history
+            .commits()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.search.is_match(c))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The selected commit's number among the matches, and the number of matches.
+    fn match_position(&self) -> (Option<usize>, usize) {
+        let matches = self.match_indices();
+        let selected = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let position = selected.and_then(|s| matches.iter().position(|m| *m == s).map(|p| p + 1));
+        (position, matches.len())
+    }
+
+    fn first_match(&self) -> Option<usize> {
+        self.match_indices().first().copied()
+    }
+
+    /// Selects the commit at index `i` of the history and scrolls to it.
+    fn jump_to(&mut self, i: Option<usize>) {
+        let Some(commit) = i.and_then(|i| self.history.commits().get(i)) else {
+            return;
+        };
+        self.select_commit(commit.id.clone());
+    }
+
+    /// The next (or previous) match after the selection; wraps around in the loaded history
+    /// and asks for more history while it is still loading.
+    fn jump(&mut self, forward: bool) {
+        let matches = self.match_indices();
+        if self.history.is_loading() {
+            self.history.load_more();
+        }
+        if matches.is_empty() {
+            return;
+        }
+        let current = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let target = match (current, forward) {
+            (Some(c), true) => matches.iter().find(|m| **m > c).or(matches.first()),
+            (Some(c), false) => matches.iter().rev().find(|m| **m < c).or(matches.last()),
+            (None, true) => matches.first(),
+            (None, false) => matches.last(),
+        };
+        self.jump_to(target.copied());
+    }
+
+    /// Commit-ID searches need no git: jump right away.
+    fn collect_search_now(&mut self) {
+        if self.search.jump_pending && !self.search.is_running() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
         }
     }
 
