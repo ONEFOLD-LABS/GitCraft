@@ -26,6 +26,11 @@ pub(crate) enum Pick {
         target: String,
         label: String,
     },
+    /// Compare HEAD with this ref.
+    Compare {
+        target: String,
+        label: String,
+    },
     DeleteTag(String),
     /// Show a stash like a commit.
     Stash(Stash),
@@ -188,6 +193,12 @@ fn ref_menu(ui: &mut egui::Ui, r: &Ref) -> Option<Pick> {
             start: r.full_name.clone(),
             label: r.name.clone(),
             suggested,
+        });
+    }
+    if !r.is_head && ui.button(tr("Mit HEAD vergleichen")).clicked() {
+        picked = Some(Pick::Compare {
+            target: r.full_name.clone(),
+            label: r.name.clone(),
         });
     }
     if ui.button(tr("Tag hier anlegen …")).clicked() {

@@ -7,9 +7,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
-    Cancel, ChangedFile, CommandLog, Commit, Discarded, FileDiff, GitError, GitRunner, Identity,
-    LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status,
-    TrustReport, Written,
+    Cancel, ChangedFile, CommandLog, Commit, Comparison, Discarded, FileDiff, GitError, GitRunner,
+    Identity, LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash,
+    Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -52,6 +52,12 @@ pub enum DiffKey {
     },
     Untracked {
         path: RepoPath,
+    },
+    /// One file between two commits (e.g. merge base and a branch, for a comparison).
+    Range {
+        from: String,
+        to: String,
+        file: ChangedFile,
     },
 }
 
@@ -160,6 +166,11 @@ pub enum Command {
         name: String,
         object: Oid,
     },
+    /// Compare two refs (`merge-base`, `log b..a`, `log a..b`, `diff base b`).
+    Compare {
+        a: String,
+        b: String,
+    },
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -195,7 +206,8 @@ const DISCARDED: usize = 5;
 const COUNT: usize = 6;
 const LOSS: usize = 7;
 const LOAD: usize = 8;
-const SLOTS: usize = 9;
+const COMPARE: usize = 9;
+const SLOTS: usize = 10;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
@@ -210,7 +222,8 @@ impl Command {
             | Command::CountLines(_)
             | Command::BranchLoss(_)
             | Command::DetachedLoss
-            | Command::LoadCommit(_) => false,
+            | Command::LoadCommit(_)
+            | Command::Compare { .. } => false,
             Command::Stage(_)
             | Command::StageAll
             | Command::Unstage(_)
@@ -251,6 +264,7 @@ impl Command {
             Command::CountLines(_) => Some(COUNT),
             Command::BranchLoss(_) | Command::DetachedLoss => Some(LOSS),
             Command::LoadCommit(_) => Some(LOAD),
+            Command::Compare { .. } => Some(COMPARE),
             _ => None,
         }
     }
@@ -278,6 +292,7 @@ pub enum Outcome {
     /// Whether there was anything to stash.
     Stashed(bool),
     Commit(Box<Commit>),
+    Comparison(Box<Comparison>),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
 }
@@ -535,6 +550,7 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
                 repo.worktree_diff(path, old.as_ref(), *staged)?
             }
             DiffKey::Untracked { path } => repo.untracked_diff(path)?,
+            DiffKey::Range { from, to, file } => repo.range_diff(from, to, file)?,
         }),
         Command::Stage(paths) => Outcome::Written(repo.stage(paths, cancel)?),
         Command::StageAll => Outcome::Written(repo.stage_all(cancel)?),
@@ -601,6 +617,7 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
             repo.restore_tag(name, object, cancel)?;
             Outcome::Written(Written::default())
         }
+        Command::Compare { a, b } => Outcome::Comparison(Box::new(repo.compare(a, b)?)),
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {
             message,

@@ -9,6 +9,7 @@
 
 mod branch;
 mod command_log;
+mod compare;
 mod diff;
 mod discard;
 mod display;
@@ -26,6 +27,7 @@ mod trust;
 
 pub use branch::{Loss, LostCommit, NameProblem};
 pub use command_log::{CommandLog, LogEntry, redact};
+pub use compare::{COMPARE_LIMIT, Comparison};
 pub use diff::{ChangedFile, FileDiff, FileStatus, Hunk, Line, LineKind, MAX_LINES};
 pub use discard::{DISCARDED_REFS, Discarded};
 pub use display::{escape, escape_bytes};
