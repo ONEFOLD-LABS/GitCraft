@@ -16,6 +16,19 @@ use serde_json::Value;
 
 /// Name der erzeugten Datei im Wurzelverzeichnis.
 pub const FILE: &str = "THIRD-PARTY-LICENSES.txt";
+/// Die Plattformen, für die GitCraft ausgeliefert wird (docs/spec.md: Linux, Windows, macOS,
+/// FreeBSD; kein Web-Build). Nur was für eine davon gebaut wird, landet in einem Paket.
+const TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "riscv64gc-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-freebsd",
+];
+
 /// Größte Lizenzdatei, die gelesen wird.
 const MAX_TEXT: u64 = 256 * 1024;
 
@@ -129,6 +142,7 @@ fn shipped(meta: &Value) -> Result<Vec<&Value>, String> {
 pub fn generate(root: &Path) -> Result<String, String> {
     let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["metadata", "--format-version", "1", "--locked"])
+        .args(TARGETS.iter().flat_map(|t| ["--filter-platform", t]))
         .current_dir(root)
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;

@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use egui::ThemePreference;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use gitcraft_git::{GitRunner, Repository};
 
 use super::*;
+use crate::history::History;
 
 /// A temporary repository, isolated from the user's git configuration.
 struct Fixture {
@@ -71,9 +73,20 @@ impl Fixture {
     fn window(&self) -> RepoWindow {
         let runner = self.runner();
         let repo = Repository::open(&runner, &self.repo()).unwrap();
-        let status = repo.status().unwrap();
+        let snapshot = worker::Snapshot::read(&repo).unwrap();
+        let mut log = repo.log().unwrap();
+        let mut commits = Vec::new();
+        loop {
+            let page = log.next_page(500).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            commits.extend(page);
+        }
         let mut w = RepoWindow::new(runner, None);
-        w.show_status(repo, status);
+        w.history = History::from_commits(commits);
+        w.repo = Some(repo);
+        w.apply(snapshot);
         w
     }
 
@@ -106,7 +119,7 @@ impl Fixture {
 
 fn shot(name: &str, preference: ThemePreference, mut w: RepoWindow) {
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(900.0, 560.0))
+        .with_size(egui::vec2(1200.0, 640.0))
         .wgpu()
         .build_ui(move |ui| w.ui(ui));
     theme::install(&harness.ctx, preference);
@@ -207,13 +220,14 @@ fn rows_group_conflicts_staged_unstaged_and_untracked() {
             ("Unversioniert", 1)
         ]
     );
-    assert!(w.rows.contains(&Row::File {
+    assert!(w.rows.iter().any(|r| matches!(r, Row::File {
         letter: 'R',
         tone: Tone::Renamed,
         meaning: "umbenannt",
-        path: "src/alt.rs -> src/neu.rs".into(),
-    }));
-    let up = w.status.as_ref().map(upstream_text).unwrap();
+        path,
+        ..
+    } if path == "src/alt.rs -> src/neu.rs")));
+    let up = w.status().map(upstream_text).unwrap();
     assert_eq!(up, "1 voraus, 1 zurück gegenüber anderer");
 }
 
@@ -230,7 +244,7 @@ fn open_runs_in_the_background() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.is_busy() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
-        w.collect();
+        w.collect(&ctx);
     }
     assert!(!w.is_busy(), "git did not answer in time");
     assert_eq!(w.error(), None);
@@ -238,7 +252,14 @@ fn open_runs_in_the_background() {
         fs::canonicalize(w.repository().unwrap().workdir()).unwrap(),
         fs::canonicalize(f.repo()).unwrap()
     );
-    assert_eq!(w.status.as_ref().unwrap().untracked().count(), 1);
+    assert_eq!(w.status().unwrap().untracked().count(), 1);
+    // The history loads in the background as well.
+    while w.history.is_loading() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        w.collect(&ctx);
+    }
+    assert!(!w.history.is_loading());
+    assert!(w.history.commits().is_empty(), "no commits yet");
 }
 
 #[test]
@@ -252,7 +273,7 @@ fn opening_something_else_shows_an_error() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.is_busy() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
-        w.collect();
+        w.collect(&ctx);
     }
     assert!(w.error().is_some_and(|e| e.contains("kein Git-Repository")));
     assert!(w.repository().is_none());
@@ -275,7 +296,23 @@ fn texts_behind_variables_are_translated() {
         "umbenannt",
         "kopiert",
         "unversioniert",
+        "Lokal",
+        "Remote",
+        "Tags",
     ];
+    texts.extend(toolbar::ACTIONS.map(|(_, label, _)| label));
+    texts.extend(search::Kind::ALL.map(search::Kind::label));
+    texts.extend([
+        "Repository öffnen",
+        "Status neu lesen",
+        "Historie durchsuchen",
+        "Nächster / vorheriger Treffer",
+        "Commit wählen",
+        "Commit-ID kopieren",
+        "Diff oder Suche schließen",
+        "Zoom",
+        "Diese Übersicht",
+    ]);
     texts.extend(
         [
             C::BothModified,
@@ -288,8 +325,318 @@ fn texts_behind_variables_are_translated() {
         ]
         .map(conflict_meaning),
     );
-    i18n::set_language(i18n::Language::English);
-    let missing: Vec<&str> = texts.into_iter().filter(|t| tr(t) == *t).collect();
-    i18n::set_language(i18n::Language::German);
+    let missing: Vec<&str> = texts
+        .into_iter()
+        .filter(|t| !i18n::has_english(t))
+        .collect();
     assert!(missing.is_empty(), "missing in i18n/en.tsv: {missing:?}");
+}
+
+/// Names from the repository or a remote reach the window escaped, like file names.
+#[test]
+fn ref_names_paths_and_git_messages_are_escaped() {
+    let head = head_text(&Head::Branch {
+        name: "main\u{202e}txt".into(),
+        commit: None,
+    });
+    assert!(head.contains("main\\u{202e}txt"), "{head}");
+    let status = Status {
+        head: Head::Branch {
+            name: "main".into(),
+            commit: None,
+        },
+        upstream: Some(gitcraft_git::Upstream {
+            name: "origin/x\u{200b}y".into(),
+            ahead_behind: None,
+        }),
+        files: Vec::new(),
+    };
+    assert!(upstream_text(&status).contains("x\\u{200b}y"));
+    let err = error_text(&GitError::Failed {
+        command: "status".into(),
+        code: Some(128),
+        stderr: "bad ref\nline\u{202e}2".into(),
+    });
+    assert!(err.contains("bad ref\\nline\\u{202e}2"), "{err}");
+    let err = error_text(&GitError::NotARepository(PathBuf::from("/tmp/a\u{202e}b")));
+    assert!(err.contains("a\\u{202e}b"), "{err}");
+    assert_eq!(
+        repo_name(Path::new("/x/repo\u{2066}name")),
+        "repo\\u{2066}name"
+    );
+}
+
+/// A history with branches, a merge, tags, a remote-like branch and work in progress: refs land
+/// on their commits, the graph has two lanes, keys move the selection.
+#[test]
+fn history_with_branches_labels_and_keyboard() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    assert!(f.git(&["tag", "-a", "v0.1", "-m", "erste Version"]));
+    assert!(f.git(&["checkout", "-q", "-b", "feature"]));
+    f.write("b.txt", "1");
+    f.commit_all("Feature anlegen");
+    f.write("b.txt", "2");
+    f.commit_all("Feature ausbauen");
+    assert!(f.git(&["checkout", "-q", "main"]));
+    f.write("a.txt", "2");
+    f.commit_all("Hauptlinie weiter");
+    assert!(f.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Feature zusammenführen",
+        "feature"
+    ]));
+    assert!(f.git(&["branch", "experiment", "HEAD~1"]));
+    f.write("a.txt", "dirty");
+
+    let mut w = f.window();
+    let commits = w.history.commits();
+    assert_eq!(commits.len(), 5);
+    assert_eq!(commits[0].subject, "Feature zusammenführen");
+    let head = head_commit(w.status().unwrap()).unwrap();
+    let labels: Vec<&str> = w.labels.of(&head).iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(labels, ["main"]);
+    let tagged = commits.last().unwrap().id.clone();
+    assert_eq!(w.labels.of(&tagged)[0].text, "v0.1");
+    assert_eq!(
+        w.selection,
+        Selection::WorkInProgress,
+        "dirty tree selects the work in progress"
+    );
+
+    w.move_selection(1);
+    assert_eq!(w.selection, Selection::Commit(head.clone()));
+    w.move_selection(100);
+    assert_eq!(w.selection, Selection::Commit(tagged));
+    w.move_selection(-1000);
+    assert_eq!(w.selection, Selection::WorkInProgress);
+
+    shot("history-dark", ThemePreference::Dark, f.window());
+    shot("history-light", ThemePreference::Light, f.window());
+    let mut w = f.window();
+    w.select_commit(head);
+    shot("history-commit-dark", ThemePreference::Dark, w);
+    let mut w = f.window();
+    w.show_keys = true;
+    shot("keys-light", ThemePreference::Light, w);
+}
+
+/// The settings window explains what the avatar switch sends; switching it saves the file and
+/// turns the avatar loader on (the test never reaches the network: nothing is drawn while on).
+#[test]
+fn avatar_setting_is_saved_and_explained() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("eins");
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    assert!(!w.settings.avatars, "off by default");
+    w.show_settings = true;
+    shot("settings-dark", ThemePreference::Dark, w);
+
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    w.settings.avatars = true;
+    w.apply_settings();
+    w.save_settings();
+    let (saved, _) = crate::settings::Settings::load(dir.path());
+    assert!(saved.avatars);
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    assert!(w.settings.avatars, "loaded again");
+}
+
+/// Commit details list the changed files; a file's diff replaces the history, Esc returns.
+#[test]
+fn commit_files_and_diff_view() {
+    let f = Fixture::new();
+    f.write("src/main.rs", "fn main() {\n\tprintln!(\"hallo\");\n}\n");
+    f.write("README.md", "Demo\n");
+    f.commit_all("Anfang");
+    f.write(
+        "src/main.rs",
+        "fn main() {\n\tprintln!(\"hallo welt\");\n\tprintln!(\"zweite Zeile\");\n}",
+    );
+    f.write("neu.txt", "neu\n");
+    assert!(f.git(&["add", "-A"]));
+    assert!(f.git(&[
+        "commit",
+        "-q",
+        "-m",
+        "Begrüßung erweitern\n\nDie Ausgabe nennt jetzt die Welt und\nbekommt eine zweite Zeile."
+    ]));
+
+    let mut w = f.window();
+    let commit = w.history.commits()[0].clone();
+    w.select_commit(commit.id.clone());
+    let repo = w.repo.clone().unwrap();
+    let files = repo.commit_files(&commit).unwrap();
+    w.details = Some(Details {
+        id: commit.id.clone(),
+        message: Some(repo.commit_message(&commit).unwrap()),
+        files: Some(files.clone()),
+        error: None,
+    });
+    shot("commit-files-dark", ThemePreference::Dark, w);
+
+    let main = files
+        .iter()
+        .find(|x| x.path.display() == "src/main.rs")
+        .unwrap()
+        .clone();
+    let diff = repo.commit_diff(&commit, &main).unwrap();
+    assert_eq!((diff.added(), diff.removed()), (3, 2));
+    let mut w = f.window();
+    w.select_commit(commit.id.clone());
+    w.diff = Some(DiffState {
+        key: worker::DiffKey::Commit {
+            commit: Box::new(commit.clone()),
+            file: main.clone(),
+        },
+        title: "src/main.rs".into(),
+        prepared: Some(Prepared::new("src/main.rs".into(), &diff)),
+        error: None,
+    });
+    shot("diff-dark", ThemePreference::Dark, w);
+    let mut w = f.window();
+    w.diff = Some(DiffState {
+        key: worker::DiffKey::Untracked {
+            path: gitcraft_git::RepoPath::from_bytes(b"x"),
+        },
+        title: "src/main.rs".into(),
+        prepared: Some(Prepared::new("src/main.rs".into(), &diff)),
+        error: None,
+    });
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 640.0))
+        .wgpu()
+        .build_ui(move |ui| w.ui(ui));
+    theme::install(&harness.ctx, ThemePreference::Light);
+    harness.run_steps(2);
+    if let (Ok(img), Ok(dir)) = (harness.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("diff-light.png")).unwrap();
+    }
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+}
+
+/// Every file row of the work in progress opens the right diff.
+#[test]
+fn work_in_progress_rows_open_their_diffs() {
+    let f = Fixture::busy_repository();
+    let w = f.window();
+    let keys: Vec<(String, Option<worker::DiffKey>)> = w
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::File { path, diff, .. } => Some((path.clone(), diff.clone())),
+            Row::Section { .. } => None,
+        })
+        .collect();
+    let get = |p: &str| keys.iter().find(|(x, _)| x == p).unwrap().1.clone();
+    assert_eq!(
+        get("konflikt.txt"),
+        None,
+        "conflicts wait for the conflict view"
+    );
+    assert!(matches!(
+        get("Cargo.toml"),
+        Some(worker::DiffKey::Worktree { staged: true, .. })
+    ));
+    assert!(matches!(
+        get("src/main.rs"),
+        Some(worker::DiffKey::Worktree { staged: false, .. })
+    ));
+    assert!(matches!(
+        get("notizen/Grüße aus Köln.txt"),
+        Some(worker::DiffKey::Untracked { .. })
+    ));
+    assert!(matches!(
+        get("src/alt.rs -> src/neu.rs"),
+        Some(worker::DiffKey::Worktree {
+            old: Some(_),
+            staged: true,
+            ..
+        })
+    ));
+}
+
+/// A search dims the other commits, jumps to the first match, and F3-style navigation wraps
+/// around; commit ids are matched by prefix without git.
+#[test]
+fn history_search_marks_and_jumps() {
+    let f = Fixture::new();
+    for (i, s) in [
+        "Parser anlegen",
+        "Plan schreiben",
+        "Parser testen",
+        "Aufräumen",
+    ]
+    .iter()
+    .enumerate()
+    {
+        f.write("a.txt", &i.to_string());
+        f.commit_all(s);
+    }
+    let mut w = f.window();
+    let ctx = egui::Context::default();
+    w.search.open();
+    w.search.set_for_test(Some("parser"), None);
+    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.search.is_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        w.collect(&ctx);
+    }
+    w.collect(&ctx);
+    let subjects = |w: &RepoWindow| match &w.selection {
+        Selection::Commit(id) => w.history.commit(id).unwrap().subject.clone(),
+        _ => String::new(),
+    };
+    assert_eq!(w.match_position(), (Some(1), 2));
+    assert_eq!(
+        subjects(&w),
+        "Parser testen",
+        "jumped to the first (newest) match"
+    );
+    w.jump(true);
+    assert_eq!(subjects(&w), "Parser anlegen");
+    w.jump(true);
+    assert_eq!(subjects(&w), "Parser testen", "wraps around");
+    w.jump(false);
+    assert_eq!(subjects(&w), "Parser anlegen");
+    shot("search-dark", ThemePreference::Dark, w);
+
+    let mut w = f.window();
+    let prefix = w.history.commits()[3].id.short().to_owned();
+    w.search.open();
+    w.search.set_for_test(Some(&prefix), Some(search::Kind::Id));
+    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    w.collect_search_now();
+    assert_eq!(subjects(&w), "Parser anlegen");
+    w.search.close();
+    assert!(!w.search.active());
+}
+
+/// The help window (F1) links to the donation page.
+#[test]
+fn help_window_opens_the_donation_page() {
+    let mut w = RepoWindow::new(GitRunner::with_program("/nonexistent/git"), None);
+    w.show_keys = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 640.0))
+        .build_ui(move |ui| w.ui(ui));
+    harness.run_steps(2);
+    harness.get_by_label("GitCraft unterstützen …").click();
+    harness.step();
+    let opened =
+        harness.output().platform_output.commands.iter().any(
+            |c| matches!(c, egui::OutputCommand::OpenUrl(u) if u.url == SPONSOR_URL && u.new_tab),
+        );
+    assert!(opened, "the donation page was not opened");
 }

@@ -15,21 +15,10 @@ impl RepoPath {
         &self.0
     }
 
-    /// Text for display; bytes that are not UTF-8 become U+FFFD. Control characters (e.g. a
-    /// newline) and invisible formatting characters are shown escaped (`\n`, `\u{202e}`): a
-    /// row stays one line, and a name cannot hide characters or reverse what is shown after it
-    /// (`invoice\u{202e}txt.exe` would otherwise read as `invoiceexe.txt`).
+    /// Text for display, escaped with [`crate::escape_bytes`]: invalid bytes as `\xNN`, control
+    /// and invisible characters as `\n`, `\u{202e}`.
     pub fn display(&self) -> String {
-        String::from_utf8_lossy(&self.0)
-            .chars()
-            .flat_map(|c| {
-                if c.is_control() || is_invisible_format(c) {
-                    c.escape_default().collect::<Vec<_>>()
-                } else {
-                    vec![c]
-                }
-            })
-            .collect()
+        crate::escape_bytes(&self.0)
     }
 
     /// The path on disk below `workdir`.
@@ -46,22 +35,6 @@ impl fmt::Debug for RepoPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", String::from_utf8_lossy(&self.0))
     }
-}
-
-/// Characters that change how text is shown without being visible themselves: bidirectional
-/// controls, zero-width characters, the soft hyphen, the byte order mark.
-fn is_invisible_format(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00ad}'
-            | '\u{061c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{feff}'
-    )
 }
 
 /// Bytes from git as a native path. Unix paths are bytes; on Windows git writes UTF-8.
@@ -87,7 +60,7 @@ mod tests {
             RepoPath::from_bytes("a\nb ü.txt".as_bytes()).display(),
             "a\\nb ü.txt"
         );
-        assert_eq!(RepoPath::from_bytes(b"x\xff").display(), "x\u{fffd}");
+        assert_eq!(RepoPath::from_bytes(b"x\xff").display(), "x\\xff");
     }
 
     #[test]
