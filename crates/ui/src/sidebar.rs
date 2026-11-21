@@ -40,6 +40,8 @@ pub(crate) enum Pick {
     },
     DropStash(Stash),
     AddRemote,
+    /// Choose or remove what this local branch tracks.
+    Upstream(String),
     Fetch(String),
     PushTag(String),
     EditRemote(String),
@@ -389,6 +391,9 @@ fn ref_menu(ui: &mut egui::Ui, r: &Ref) -> Option<Pick> {
     }
     if r.kind == RefKind::Tag && ui.button(tr("Löschen …")).clicked() {
         picked = Some(Pick::DeleteTag(r.name.clone()));
+    }
+    if r.kind == RefKind::Local && ui.button(tr("Upstream festlegen …")).clicked() {
+        picked = Some(Pick::Upstream(r.name.clone()));
     }
     if r.kind == RefKind::Local {
         if ui.button(tr("Umbenennen …")).clicked() {

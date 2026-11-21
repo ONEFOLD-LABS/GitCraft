@@ -1195,6 +1195,33 @@ impl RepoWindow {
                         self.branch_dialog = Some(branches::Dialog::Delete { name, loss: None });
                     }
                     Some(Pick::AddRemote) => self.remote_dialog = Some(remotes::Dialog::add()),
+                    Some(Pick::Upstream(branch)) => {
+                        let local = refs
+                            .iter()
+                            .find(|r| r.kind == gitcraft_git::RefKind::Local && r.name == branch);
+                        let current = local.and_then(|r| r.upstream.clone());
+                        let choices: Vec<(String, String)> = refs
+                            .iter()
+                            .filter(|r| r.kind == gitcraft_git::RefKind::Remote)
+                            .map(|r| (r.full_name.clone(), r.name.clone()))
+                            .collect();
+                        // Preselect the current upstream, else the branch of the same name.
+                        let chosen = choices
+                            .iter()
+                            .position(|(_, short)| Some(short) == current.as_ref())
+                            .or_else(|| {
+                                choices.iter().position(|(_, short)| {
+                                    short.rsplit_once('/').is_some_and(|(_, b)| b == branch)
+                                })
+                            })
+                            .unwrap_or(0);
+                        self.remote_dialog = Some(remotes::Dialog::Upstream {
+                            branch,
+                            current,
+                            choices,
+                            chosen,
+                        });
+                    }
                     Some(Pick::PushTag(tag)) => {
                         if let Some(remote) = default_remote(remotes) {
                             let title = trf("Tag {name} pushen", &[("name", &escape(&tag))]);
@@ -2230,6 +2257,30 @@ impl RepoWindow {
                 );
                 ui.label(RichText::new(text).color(t.text_dim));
             }
+            let cut = self.snapshot.as_ref().map_or(0, |s| s.shallow.len());
+            if cut > 0 {
+                ui.label(RichText::new("·").color(t.text_dim));
+                let mut deepen = None;
+                ui.menu_button(tr("Flacher Klon"), |ui| {
+                    ui.label(
+                        RichText::new(tr(
+                            "Die Historie ist abgeschnitten (gestrichelt in der Historie).",
+                        ))
+                        .color(t.text_dim),
+                    );
+                    if ui.button(tr("100 Commits mehr holen")).clicked() {
+                        deepen = Some(Some(100));
+                        ui.close();
+                    }
+                    if ui.button(tr("Ganze Historie holen")).clicked() {
+                        deepen = Some(None);
+                        ui.close();
+                    }
+                });
+                if let Some(by) = deepen {
+                    self.start(Command::Deepen(by), tr("Mehr Historie holen").to_owned());
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let log = shortcut_hint(ui.ctx(), tr("Befehlsprotokoll"), &LOG);
                 if ui
@@ -2377,6 +2428,11 @@ impl RepoWindow {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let shallow = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.shallow.clone())
+            .unwrap_or_default();
         let view = View {
             labels: &self.labels,
             avatars: &self.avatars,
@@ -2384,6 +2440,7 @@ impl RepoWindow {
             wip,
             head: head.as_ref(),
             now,
+            shallow: &shallow,
         };
         let actions = self.history.show(ui, t, &view, &self.selection);
         for action in actions {

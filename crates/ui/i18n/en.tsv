@@ -476,3 +476,17 @@ Den Ordner, in den geklont wird, gibt es nicht.	The folder to clone into does no
 Der Ordnername fehlt oder ist ungültig.	The folder name is missing or invalid.
 Den Zielordner gibt es schon, und er ist nicht leer.	The target folder already exists and is not empty.
 Die Tiefe ist eine Zahl ab 1.	The depth is a number from 1.
+100 Commits mehr holen	Fetch 100 more commits
+Die Historie ist abgeschnitten (gestrichelt in der Historie).	The history is cut off (dashed in the history).
+Es gibt keine Remote-Branches; hole sie zuerst (Fetch).	There are no remote branches; fetch them first.
+Festlegen	Set
+Flacher Klon	Shallow clone
+Ganze Historie holen	Fetch the whole history
+Historie hier abgeschnitten	history cut off here
+Mehr Historie holen	Fetch more history
+Remote-Branch	Remote branch
+Upstream entfernen	Remove upstream
+Upstream festlegen …	Set upstream …
+Upstream festlegen	Set upstream
+{branch} folgt keinem Remote-Branch. Mit einem Upstream wissen Pull und Push, wohin.	{branch} tracks no remote branch. With an upstream, pull and push know where to go.
+{branch} folgt {upstream}. Pull holt von dort, Push lädt dorthin hoch, und die Zahlen voraus/zurück beziehen sich darauf.	{branch} tracks {upstream}. Pull fetches from there, push uploads there, and the ahead/behind numbers refer to it.

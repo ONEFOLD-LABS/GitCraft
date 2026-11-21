@@ -263,6 +263,8 @@ pub(crate) struct View<'a> {
     pub wip: Option<WipCounts>,
     pub head: Option<&'a Oid>,
     pub now: i64,
+    /// Commits where a shallow repository's history is cut.
+    pub shallow: &'a [Oid],
 }
 
 /// What the user asked for in the history.
@@ -492,6 +494,16 @@ impl History {
                 3.0,
             ));
         }
+        let cut = view.shallow.contains(&commit.id);
+        if cut {
+            // History goes on, but this clone does not have it.
+            graph.extend(Shape::dashed_line(
+                &[pos2(c.x, c.y + NODE_R + 1.0), pos2(c.x, cols.rect.bottom())],
+                Stroke::new(1.5, t.text_dim),
+                2.0,
+                3.0,
+            ));
+        }
         let color = lane_color(row.color);
         let labels = view.labels.of(&commit.id);
         // Refs column, joined to the node by a line in the lane colour.
@@ -527,13 +539,22 @@ impl History {
 
         // Message, author, date.
         let subject = escape(&commit.subject);
-        p.with_clip_rect(cols.message).text(
+        let shown = p.with_clip_rect(cols.message).text(
             pos2(cols.message.left(), mid),
             egui::Align2::LEFT_CENTER,
             &subject,
             FontId::proportional(14.0),
             t.text,
         );
+        if cut {
+            p.with_clip_rect(cols.message).text(
+                pos2(shown.right() + 12.0, mid),
+                egui::Align2::LEFT_CENTER,
+                tr("Historie hier abgeschnitten"),
+                FontId::proportional(12.5),
+                t.text_dim,
+            );
+        }
         if cols.author.width() > 0.0 {
             p.with_clip_rect(cols.author).text(
                 pos2(cols.author.left(), mid),
@@ -560,6 +581,9 @@ impl History {
         let mut text = subject;
         if !refs.is_empty() {
             text = format!("{text} ({})", refs.join(", "));
+        }
+        if cut {
+            text = format!("{text} ({})", tr("Historie hier abgeschnitten"));
         }
         format!("{text}, {}, {date}", escape(&commit.author.name))
     }

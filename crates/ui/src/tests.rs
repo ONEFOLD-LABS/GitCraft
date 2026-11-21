@@ -386,6 +386,7 @@ fn texts_behind_variables_are_translated() {
         "Branch zum ersten Mal hochladen",
         "Push abgelehnt",
         "Force-Push?",
+        "Upstream festlegen",
         "Pull (nur Vorspulen)",
         "Pull mit Merge",
         "Pull mit Rebase",
@@ -1989,4 +1990,73 @@ fn render_clone_dialog() {
     d.depth = "1".into();
     w.clone = Some(d);
     shot("clone-light", ThemePreference::Light, w);
+}
+
+/// A branch gets an upstream from the sidebar and loses it again.
+#[test]
+fn upstream_is_chosen_in_the_sidebar() {
+    crate::i18n::set_language(crate::i18n::Language::German);
+    let f = fixture_with_remote();
+    assert!(f.git(&["branch", "lokal"]));
+    let mut h = harness(f.window());
+    h.get_by_label("lokal").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Upstream festlegen …").click();
+    settle(&mut h);
+    h.get_by_label("Festlegen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    let tracked = |h: &Harness<'_, RepoWindow>| {
+        h.state()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .refs
+            .iter()
+            .find(|r| r.name == "lokal")
+            .and_then(|r| r.upstream.clone())
+    };
+    assert_eq!(tracked(&h).as_deref(), Some("origin/main"));
+    h.get_by_label("lokal").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Upstream festlegen …").click();
+    settle(&mut h);
+    h.get_by_label("Upstream entfernen").click();
+    settle(&mut h);
+    assert_eq!(tracked(&h), None);
+}
+
+/// A shallow clone marks where its history is cut and offers to fetch more.
+#[test]
+fn render_shallow_clone() {
+    let f = fixture_with_remote();
+    push_from_other(&f, "b.txt");
+    push_from_other(&f, "c.txt");
+    let up = f.tmp.path().join("up.git");
+    git_in(
+        &f,
+        f.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            "--depth=2",
+            &format!("file://{}", up.display()).replace('\\', "/"),
+            "flach",
+        ],
+    );
+    let runner = f.runner();
+    let (session, snapshot) = RepoSession::open(
+        runner.clone(),
+        &f.tmp.path().join("flach"),
+        std::sync::Arc::new(|| {}),
+    )
+    .unwrap();
+    assert_eq!(snapshot.shallow.len(), 1);
+    let mut log = session.reader().log().unwrap();
+    let commits = log.next_page(500).unwrap();
+    let mut w = RepoWindow::new(runner, None);
+    w.history = History::from_commits(commits);
+    w.session = Some(session);
+    w.apply(snapshot);
+    shot("shallow-dark", ThemePreference::Dark, w);
 }

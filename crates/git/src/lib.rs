@@ -30,6 +30,7 @@ mod status;
 mod tag;
 mod trust;
 mod undo;
+mod upstream;
 
 pub use branch::{Loss, LostCommit, NameProblem};
 pub use clone::{CloneOptions, clone_dir_name, has_submodules};

@@ -50,6 +50,14 @@ pub(crate) enum Dialog {
     Force {
         info: Option<(String, Option<Oid>, Loss)>,
     },
+    /// What a local branch tracks: `choices` are (full ref name, short name) of the remote
+    /// branches.
+    Upstream {
+        branch: String,
+        current: Option<String>,
+        choices: Vec<(String, String)>,
+        chosen: usize,
+    },
     /// A fast-forward pull is not possible; merge or rebase must be chosen.
     Diverged {
         branch: String,
@@ -104,6 +112,7 @@ impl Dialog {
             Dialog::MoveCredentials { .. } => "Zugangsdaten aus der URL nehmen",
             Dialog::Diverged { .. } => "Vorspulen nicht möglich",
             Dialog::FirstPush { .. } => "Branch zum ersten Mal hochladen",
+            Dialog::Upstream { .. } => "Upstream festlegen",
             Dialog::Rejected { .. } => "Push abgelehnt",
             Dialog::Force { .. } => "Force-Push?",
         }
@@ -277,6 +286,62 @@ impl Dialog {
                 ui.horizontal(|ui| {
                     if ui.button(tr("Verschieben")).clicked() {
                         decision = Decision::Run(Command::MoveCredentials(name.clone()));
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::Upstream {
+                branch,
+                current,
+                choices,
+                chosen,
+            } => {
+                ui.label(match current {
+                    Some(up) => trf(
+                        "{branch} folgt {upstream}. Pull holt von dort, Push lädt dorthin hoch, und die Zahlen voraus/zurück beziehen sich darauf.",
+                        &[("branch", &escape(branch)), ("upstream", &escape(up))],
+                    ),
+                    None => trf(
+                        "{branch} folgt keinem Remote-Branch. Mit einem Upstream wissen Pull und Push, wohin.",
+                        &[("branch", &escape(branch))],
+                    ),
+                });
+                if choices.is_empty() {
+                    ui.label(
+                        RichText::new(tr(
+                            "Es gibt keine Remote-Branches; hole sie zuerst (Fetch).",
+                        ))
+                        .color(t.text_dim),
+                    );
+                } else {
+                    let l = ui.label(tr("Remote-Branch"));
+                    let shown = choices
+                        .get(*chosen)
+                        .map(|(_, short)| escape(short))
+                        .unwrap_or_default();
+                    egui::ComboBox::from_id_salt("upstream-choice")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            for (i, (_, short)) in choices.iter().enumerate() {
+                                ui.selectable_value(chosen, i, escape(short));
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id);
+                }
+                ui.horizontal(|ui| {
+                    if let Some((full, _)) = choices.get(*chosen)
+                        && ui.button(tr("Festlegen")).clicked()
+                    {
+                        decision = Decision::Run(Command::SetUpstream {
+                            branch: branch.clone(),
+                            upstream: full.clone(),
+                        });
+                    }
+                    if current.is_some() && ui.button(tr("Upstream entfernen")).clicked() {
+                        decision = Decision::Run(Command::UnsetUpstream(branch.clone()));
                     }
                     if ui.button(tr("Abbrechen")).clicked() {
                         decision = Decision::Close;

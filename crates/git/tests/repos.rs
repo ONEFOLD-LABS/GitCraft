@@ -2455,3 +2455,63 @@ fn a_cancelled_clone_removes_only_what_it_created() {
     );
     assert!(!failed.exists());
 }
+
+#[test]
+fn upstream_is_set_and_removed() {
+    let f = with_remote();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    f.git(&["switch", "-q", "-c", "lokal"]);
+    assert_eq!(repo.divergence(), Err(GitError::NoUpstream));
+    repo.set_upstream("lokal", "refs/remotes/origin/main", &cancel)
+        .unwrap();
+    assert_eq!(repo.divergence().unwrap(), (0, 0));
+    assert_eq!(
+        repo.status().unwrap().upstream.map(|u| u.name),
+        Some("origin/main".to_owned())
+    );
+    repo.unset_upstream("lokal", &cancel).unwrap();
+    assert_eq!(repo.status().unwrap().upstream, None);
+    assert!(matches!(
+        repo.set_upstream("lokal", "--track", &cancel),
+        Err(GitError::InvalidValue(_))
+    ));
+    assert!(
+        repo.set_upstream("-x", "refs/remotes/origin/main", &cancel)
+            .is_err()
+    );
+}
+
+#[test]
+fn shallow_clones_show_their_boundary_and_deepen() {
+    let f = with_remote();
+    for i in 0..4 {
+        f.push_from_other(&format!("n{i}.txt"), "x\n");
+    }
+    let up = f.tmp.path().join("up.git");
+    let url = format!("file://{}", up.display()).replace('\\', "/");
+    let url = if url.starts_with("file:///") {
+        url
+    } else {
+        url.replacen("file://", "file:///", 1)
+    };
+    let dir = f.tmp.path().join("flach");
+    let runner = f.runner();
+    let cancel = Cancel::new();
+    let mut options = clone_options(&url, dir.clone());
+    options.depth = Some(2);
+    runner
+        .clone_repository(&options, &cancel, no_progress())
+        .unwrap();
+    let repo = Repository::open(&runner, &dir).unwrap();
+    assert_eq!(repo.shallow_boundary().unwrap().len(), 1);
+    repo.deepen(Some(1), &cancel, no_progress()).unwrap();
+    assert_eq!(
+        repo.shallow_boundary().unwrap().len(),
+        1,
+        "still cut, one further back"
+    );
+    repo.deepen(None, &cancel, no_progress()).unwrap();
+    assert_eq!(repo.shallow_boundary().unwrap(), []);
+    assert_eq!(f.open().shallow_boundary().unwrap(), [], "a full clone");
+}
