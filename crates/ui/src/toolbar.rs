@@ -98,7 +98,8 @@ pub(crate) fn button(
     resp
 }
 
-/// The action buttons. Those in `ready` work; the others are disabled with the version that
+/// The action buttons. `known` lists the actions that exist: whether they can run now and their
+/// tooltip (what they would do, or why not). The others are disabled with the version that
 /// brings them in the tooltip. Pull and Push show how many commits the current branch is behind
 /// and ahead of its upstream. Returns the clicked action.
 pub(crate) fn actions(
@@ -106,7 +107,7 @@ pub(crate) fn actions(
     t: &Tokens,
     behind: u32,
     ahead: u32,
-    ready: &[Icon],
+    known: &[(Icon, bool, String)],
 ) -> Option<Icon> {
     let mut clicked = None;
     for (icon, label, version) in ACTIONS {
@@ -115,19 +116,22 @@ pub(crate) fn actions(
             Icon::Push => Some(ahead),
             _ => None,
         };
-        let enabled = ready.contains(&icon);
-        let mut hint = if enabled {
-            String::new()
-        } else {
-            trf("Kommt mit Version {v}", &[("v", &version)])
-        };
+        let (enabled, mut hint) = known
+            .iter()
+            .find(|(i, _, _)| *i == icon)
+            .map(|(_, on, h)| (*on, h.clone()))
+            .unwrap_or_else(|| (false, trf("Kommt mit Version {v}", &[("v", &version)])));
         if let Some(n) = badge.filter(|n| *n > 0) {
             let what = if icon == Icon::Pull {
                 trf("{n} Commits zum Holen", &[("n", &n)])
             } else {
                 trf("{n} Commits zum Hochladen", &[("n", &n)])
             };
-            hint = format!("{what}. {hint}");
+            hint = if hint.is_empty() {
+                what
+            } else {
+                format!("{what}. {hint}")
+            };
         }
         let resp = button(ui, t, icon, tr(label), enabled, badge);
         let resp = if hint.is_empty() {

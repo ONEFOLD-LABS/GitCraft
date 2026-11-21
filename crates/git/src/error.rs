@@ -49,6 +49,8 @@ pub enum GitError {
     WouldOverwrite(Vec<String>),
     /// Applying left conflicts in the working tree (git's report).
     Conflicts(String),
+    /// The commit is already on a remote; undoing it would need a force push.
+    Pushed,
     /// The user cancelled the call; git and what it started were stopped.
     Cancelled,
     /// The repository's configuration names a program in a way GitCraft cannot switch off.
@@ -94,6 +96,7 @@ impl fmt::Display for GitError {
                 )
             }
             GitError::Cancelled => write!(f, "cancelled"),
+            GitError::Pushed => write!(f, "the commit is already on a remote"),
             GitError::Conflicts(_) => write!(f, "applying left conflicts"),
             GitError::InvalidName { name, problem } => {
                 write!(f, "invalid name {name:?} ({problem:?})")

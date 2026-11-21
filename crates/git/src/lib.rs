@@ -24,6 +24,7 @@ mod stash;
 mod status;
 mod tag;
 mod trust;
+mod undo;
 
 pub use branch::{Loss, LostCommit, NameProblem};
 pub use command_log::{CommandLog, LogEntry, redact};
@@ -39,3 +40,4 @@ pub use repo::{Identity, NameError, Repository, SearchKind, SearchStream, UNTRAC
 pub use runner::{Cancel, GitRunner, GitStream, GitVersion, MIN_VERSION, Written};
 pub use status::{Change, Conflict, FileChange, Head, Oid, State, Status, Upstream};
 pub use trust::{ProgramSetting, TrustReport};
+pub use undo::HeadPos;

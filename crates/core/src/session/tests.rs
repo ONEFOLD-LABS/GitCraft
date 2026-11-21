@@ -315,7 +315,11 @@ fn commit_through_the_queue() {
     let got = settle(&session);
     assert!(got.iter().any(|e| matches!(
         e,
-        Event::Finished { id, result: Ok(Outcome::Written(_)), .. } if *id == commit
+        Event::Finished {
+            id,
+            result: Ok(Outcome::Committed { before: None, after: Some(_), .. }),
+            ..
+        } if *id == commit
     )));
     assert!(last_snapshot(&got).status.is_clean());
     session.submit(Command::AmendInfo);

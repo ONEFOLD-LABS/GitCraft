@@ -2,7 +2,7 @@
 //! put a deleted one back exactly (by the object its ref pointed to).
 
 use crate::branch::NameProblem;
-use crate::{Cancel, GitError, Oid, Repository, Written};
+use crate::{Cancel, GitError, Oid, Repository};
 
 impl Repository {
     fn tag_name_ok(&self, name: &str) -> Result<(), GitError> {
@@ -30,7 +30,8 @@ impl Repository {
     }
 
     /// Creates tag `name` at `target`. With a `message` the tag is annotated (message on stdin)
-    /// and, with `sign`, signed as configured; without one it is lightweight.
+    /// and, with `sign`, signed as configured; without one it is lightweight. Returns the
+    /// object the new tag's ref points to.
     pub fn create_tag(
         &self,
         name: &str,
@@ -38,10 +39,10 @@ impl Repository {
         message: Option<&str>,
         sign: bool,
         cancel: &Cancel,
-    ) -> Result<Written, GitError> {
+    ) -> Result<Oid, GitError> {
         self.tag_name_ok(name)?;
         match message {
-            None => self.write(["tag", "--end-of-options", name, target], None, cancel),
+            None => self.write(["tag", "--end-of-options", name, target], None, cancel)?,
             Some(message) => {
                 let mut args = vec!["tag", if sign { "-s" } else { "-a" }];
                 args.extend([
@@ -52,9 +53,20 @@ impl Repository {
                     name,
                     target,
                 ]);
-                self.write(args, Some(message.as_bytes()), cancel)
+                self.write(args, Some(message.as_bytes()), cancel)?
             }
-        }
+        };
+        let full = format!("refs/tags/{name}");
+        let out = self.read([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            full.as_str(),
+        ])?;
+        let text = String::from_utf8_lossy(&out);
+        Oid::parse(text.trim())
+            .ok_or_else(|| GitError::Parse(format!("rev-parse: {}", text.trim())))
     }
 
     /// Deletes a tag; returns the object its ref pointed to (the tag object of an annotated

@@ -19,12 +19,15 @@ pub mod settings;
 mod sidebar;
 pub mod theme;
 mod toolbar;
+mod undo;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
-use gitcraft_core::{Command, DiffKey, Event, Outcome, RepoSession, Snapshot, Task, Wake};
+use gitcraft_core::{
+    Command, DiffKey, Event, OperationId, Outcome, RepoSession, Snapshot, Task, Wake,
+};
 use gitcraft_git::{
     Change, ChangedFile, Conflict, Discarded, FileChange, FileStatus, GitError, GitRunner,
     GitVersion, Head, MIN_VERSION, Oid, RepoPath, Status, escape,
@@ -51,6 +54,9 @@ const NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const LOG: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L);
+const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const REDO: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const KEYS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
 /// Colour role of a file row; the colour itself comes from the theme.
@@ -167,6 +173,13 @@ pub struct RepoWindow {
     confirm: Option<Confirm>,
     /// What the last discard, delete or restore did, with the saved state that undoes it.
     notice: Option<(String, Option<Command>)>,
+    /// Steps that can be undone and redone.
+    undo: undo::History,
+    /// The undo (`false`) or redo (`true`) confirmation is open.
+    undo_prompt: Option<bool>,
+    /// Commands run by undo or redo are not recorded as new steps.
+    replaying: bool,
+    replay_ids: std::collections::HashSet<OperationId>,
     /// Two refs compared in the centre.
     compare: Option<compare::CompareView>,
     /// A commit shown that is not in the loaded history (a stash).
@@ -222,6 +235,10 @@ impl RepoWindow {
             branch_dialog: None,
             extra_commit: None,
             compare: None,
+            undo: undo::History::default(),
+            undo_prompt: None,
+            replaying: false,
+            replay_ids: std::collections::HashSet::new(),
             discarded: Vec::new(),
             show_discarded: false,
             trust_prompt: None,
@@ -299,7 +316,10 @@ impl RepoWindow {
             return false;
         };
         if session.is_trusted() {
-            session.submit(command);
+            let id = session.submit(command);
+            if self.replaying {
+                self.replay_ids.insert(id);
+            }
             return true;
         }
         if self.read_only {
@@ -367,6 +387,8 @@ impl RepoWindow {
         self.confirm = None;
         self.notice = None;
         self.discarded.clear();
+        self.undo.clear();
+        self.undo_prompt = None;
         if session.is_trusted() {
             let keep = i64::from(self.settings.discard_days).saturating_mul(24 * 3600);
             session.submit(Command::PruneDiscarded(keep));
@@ -446,8 +468,19 @@ impl RepoWindow {
         for event in events {
             match event {
                 Event::Finished {
-                    command, result, ..
-                } => self.finished(command, result, ctx),
+                    id,
+                    command,
+                    result,
+                } => {
+                    let replay = self.replay_ids.remove(&id);
+                    if !replay
+                        && let Ok(outcome) = &result
+                        && let Some(step) = undo::record(&command, outcome)
+                    {
+                        self.undo.push(step);
+                    }
+                    self.finished(command, result, ctx);
+                }
             }
         }
         self.history.poll();
@@ -497,8 +530,8 @@ impl RepoWindow {
                     }
                 }
             }
-            (Command::Commit { .. }, Ok(Outcome::Written(out))) => {
-                self.commit.committed(&out.stderr);
+            (Command::Commit { .. }, Ok(Outcome::Committed { output, .. })) => {
+                self.commit.committed(&output.stderr);
                 self.error = None;
             }
             (Command::Commit { .. }, Err(e)) => {
@@ -570,7 +603,8 @@ impl RepoWindow {
                 };
                 self.branch_dialog = Some(branches::Dialog::Overwrite { files, target });
             }
-            (Command::StashPush { .. }, Ok(Outcome::Stashed(any))) => {
+            (Command::StashPush { .. }, Ok(Outcome::Stashed(stash))) => {
+                let any = stash.is_some();
                 self.error = None;
                 self.notice = Some((
                     if any {
@@ -676,6 +710,7 @@ impl RepoWindow {
         self.trust_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.branch_dialog(&ctx);
+        self.undo_dialog(&ctx);
         if self.show_discarded {
             let mut open = true;
             let restore = discard::discarded_window(
@@ -1062,6 +1097,12 @@ impl RepoWindow {
             let find = i.consume_shortcut(&FIND);
             let previous = i.consume_shortcut(&PREVIOUS);
             let next = i.consume_shortcut(&NEXT);
+            // Redo first: the plain pattern would also match Shift.
+            if !typing && i.consume_shortcut(&REDO) {
+                self.undo_prompt = Some(true);
+            } else if !typing && i.consume_shortcut(&UNDO) {
+                self.undo_prompt = Some(false);
+            }
             if i.consume_shortcut(&LOG) {
                 self.log_panel.toggle();
             }
@@ -1186,21 +1227,70 @@ impl RepoWindow {
                 .and_then(|s| s.upstream.as_ref())
                 .and_then(|u| u.ahead_behind)
                 .map_or((0, 0), |(a, b)| (b, a));
-            let mut ready = Vec::new();
+            let mut known: Vec<(toolbar::Icon, bool, String)> = Vec::new();
             if self.session.is_some() {
-                ready.push(toolbar::Icon::Branch);
-                if self.status().is_some_and(|s| !s.is_clean()) {
-                    ready.push(toolbar::Icon::Stash);
-                }
-                if self
+                known.push(match self.undo.next_undo() {
+                    Some(step) => (
+                        toolbar::Icon::Undo,
+                        true,
+                        shortcut_hint(
+                            &ctx,
+                            &trf("Rückgängig: {was}", &[("was", &step.label)]),
+                            &UNDO,
+                        ),
+                    ),
+                    None => (
+                        toolbar::Icon::Undo,
+                        false,
+                        tr("Nichts rückgängig zu machen").to_owned(),
+                    ),
+                });
+                known.push(match self.undo.next_redo() {
+                    Some(step) => (
+                        toolbar::Icon::Redo,
+                        true,
+                        shortcut_hint(
+                            &ctx,
+                            &trf("Wiederholen: {was}", &[("was", &step.label)]),
+                            &REDO,
+                        ),
+                    ),
+                    None => (
+                        toolbar::Icon::Redo,
+                        false,
+                        tr("Nichts zu wiederholen").to_owned(),
+                    ),
+                });
+                known.push((toolbar::Icon::Branch, true, tr("Neuer Branch").to_owned()));
+                let dirty = self.status().is_some_and(|s| !s.is_clean());
+                known.push((
+                    toolbar::Icon::Stash,
+                    dirty,
+                    if dirty {
+                        tr("Änderungen parken (Stash)")
+                    } else {
+                        tr("Keine Änderungen zum Parken")
+                    }
+                    .to_owned(),
+                ));
+                let stashed = self
                     .snapshot
                     .as_ref()
-                    .is_some_and(|s| !s.stashes.is_empty())
-                {
-                    ready.push(toolbar::Icon::Pop);
-                }
+                    .is_some_and(|s| !s.stashes.is_empty());
+                known.push((
+                    toolbar::Icon::Pop,
+                    stashed,
+                    if stashed {
+                        tr("Neuesten Stash anwenden und entfernen")
+                    } else {
+                        tr("Kein Stash vorhanden")
+                    }
+                    .to_owned(),
+                ));
             }
-            match toolbar::actions(ui, t, behind, ahead, &ready) {
+            match toolbar::actions(ui, t, behind, ahead, &known) {
+                Some(toolbar::Icon::Undo) => self.undo_prompt = Some(false),
+                Some(toolbar::Icon::Redo) => self.undo_prompt = Some(true),
                 Some(toolbar::Icon::Branch) => self.new_branch_here(),
                 Some(toolbar::Icon::Stash) => {
                     self.branch_dialog = Some(branches::Dialog::Stash {
@@ -1304,6 +1394,44 @@ impl RepoWindow {
                     title,
                 );
             }
+            None => {}
+        }
+    }
+
+    fn undo_dialog(&mut self, ctx: &egui::Context) {
+        let Some(redo) = self.undo_prompt else {
+            return;
+        };
+        let step = if redo {
+            self.undo.next_redo()
+        } else {
+            self.undo.next_undo()
+        };
+        let Some(step) = step.cloned() else {
+            self.undo_prompt = None;
+            return;
+        };
+        let t = theme::tokens(ctx);
+        match undo::confirm(ctx, t, &step, redo) {
+            Some(true) => {
+                self.undo_prompt = None;
+                let step = if redo {
+                    self.undo.take_redo()
+                } else {
+                    self.undo.take_undo()
+                };
+                let commands = step
+                    .map(|s| if redo { s.redo } else { s.undo })
+                    .unwrap_or_default();
+                self.replaying = true;
+                for command in commands {
+                    if !self.write(command) {
+                        break;
+                    }
+                }
+                self.replaying = false;
+            }
+            Some(false) => self.undo_prompt = None,
             None => {}
         }
     }
@@ -1651,6 +1779,10 @@ impl RepoWindow {
                     ),
                     (f(&COPY), "Commit-ID kopieren"),
                     (f(&LOG), "Befehlsprotokoll ein/aus"),
+                    (
+                        format!("{} / {}", f(&UNDO), f(&REDO)),
+                        "Rückgängig / Wiederholen (mit Rückfrage)",
+                    ),
                     (
                         tr("Pfeil hoch/runter, Shift+Pfeil, Enter").to_owned(),
                         "Zeilen im Diff wählen und vormerken",
@@ -2534,6 +2666,7 @@ fn error_text(e: &GitError) -> String {
             "Beim Anwenden sind Konflikte entstanden ({dateien}). Der Stash bleibt erhalten; löse die Konflikte in der Änderungsliste.",
             &[("dateien", &escape(files))],
         ),
+        GitError::Pushed => tr("Dieser Commit liegt schon auf einem Remote; ihn zurückzunehmen bräuchte einen Force-Push. GitCraft macht das nicht rückgängig.").to_owned(),
         GitError::Stale => tr("Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.").to_owned(),
         GitError::InvalidValue(v) => trf(
             "Ungültige Eingabe: {wert}",

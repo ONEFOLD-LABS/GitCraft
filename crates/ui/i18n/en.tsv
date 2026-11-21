@@ -308,3 +308,32 @@ nur die neuesten {n}	only the newest {n}
 Keine gemeinsame Geschichte: es gibt keine Basis für einen Vergleich der Dateien.	No common history: there is no base to compare the files.
 Was {b} seit der gemeinsamen Basis {basis} ändert ({n} Dateien)	What {b} changes since the common base {basis} ({n} files)
 Was {b} seit der gemeinsamen Basis {basis} ändert (1 Datei)	What {b} changes since the common base {basis} (1 file)
+(gesicherte Dateien aus {ref} zurückschreiben)	(write the saved files from {ref} back)
+(unversionierte Dateien löschen)	(delete untracked files)
+Branch {alt} in {neu} umbenennen	Rename branch {alt} to {neu}
+Branch {name} anlegen	Create branch {name}
+Branch {name} löschen	Delete branch {name}
+Commit ändern „{titel}“	Amend commit "{titel}"
+Commit „{titel}“	Commit "{titel}"
+Dateien löschen	Delete files
+Dieser Commit liegt schon auf einem Remote; ihn zurückzunehmen bräuchte einen Force-Push. GitCraft macht das nicht rückgängig.	This commit is already on a remote; taking it back would need a force push. GitCraft does not undo it.
+GitCraft führt dazu aus:	GitCraft runs:
+Neuesten Stash anwenden und entfernen	Apply and remove the newest stash
+Nicht committete Änderungen bleiben unberührt. Hat sich seitdem etwas verschoben, bricht GitCraft ab, statt etwas zu überschreiben.	Uncommitted changes stay untouched. If something moved since, GitCraft stops instead of overwriting anything.
+Rückgängig machen	Undo
+Rückgängig machen?	Undo?
+Rückgängig: {was}	Undo: {was}
+Stash anlegen	Create stash
+Stash löschen	Delete stash
+Tag {name} anlegen	Create tag {name}
+Tag {name} löschen	Delete tag {name}
+Wechsel zu {ziel}	Switch to {ziel}
+Wiederholen: {was}	Redo: {was}
+Wiederholen?	Redo?
+Änderungen verwerfen	Discard changes
+Rückgängig / Wiederholen (mit Rückfrage)	Undo / redo (asks first)
+Erneut ausführen	Do it again
+Nichts rückgängig zu machen	Nothing to undo
+Nichts zu wiederholen	Nothing to redo
+Keine Änderungen zum Parken	No changes to stash
+Kein Stash vorhanden	No stash

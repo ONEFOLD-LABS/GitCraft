@@ -350,6 +350,9 @@ fn texts_behind_variables_are_translated() {
         "Änderungen parken (Stash)",
         "Stash löschen?",
         "Neuer Tag",
+        "Rückgängig / Wiederholen (mit Rückfrage)",
+        "Wiederholen?",
+        "Rückgängig machen?",
         "Tag löschen?",
         "Die Nachricht fehlt.",
         "Was {b} seit der gemeinsamen Basis {basis} ändert (1 Datei)",
@@ -1481,4 +1484,88 @@ fn compare_with_a_branch() {
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     assert!(h.state().compare.is_none());
+}
+
+fn head_id(f: &Fixture) -> String {
+    let out = Command::new("git")
+        .current_dir(f.repo())
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A commit made in GitCraft is undone softly (changes stay staged) and redone.
+#[test]
+fn undo_and_redo_a_commit() {
+    let f = two_commit_fixture();
+    let before = head_id(&f);
+    f.write("b.txt", "neu\n");
+    let mut h = harness(f.window());
+    h.get_by_label("Alle vormerken").click();
+    settle(&mut h);
+    h.state_mut().commit.set_identity(gitcraft_git::Identity {
+        name: Some("Test".into()),
+        email: Some("t@invalid".into()),
+    });
+    type_into(&mut h, "Zusammenfassung", "Drei");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    settle(&mut h);
+    let after = head_id(&f);
+    assert_ne!(before, after);
+
+    h.get_by_label("Rückgängig").click();
+    settle(&mut h);
+    h.get_by_label(&format!("git reset --soft {before}"));
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("undo-dark.png")).unwrap();
+    }
+    h.get_by_label("Rückgängig machen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(head_id(&f), before);
+    assert_eq!(
+        staged_paths(h.state()),
+        ["b.txt"],
+        "the changes stay staged"
+    );
+
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Z,
+    );
+    settle(&mut h);
+    h.get_by_label("Wiederholen?");
+    h.get_by_label("Erneut ausführen").click();
+    settle(&mut h);
+    assert_eq!(head_id(&f), after);
+}
+
+/// A new branch that was checked out: undo switches back and removes it.
+#[test]
+fn undo_a_new_branch() {
+    let f = two_commit_fixture();
+    let mut h = harness(f.window());
+    h.get_by_label("Branch").click();
+    settle(&mut h);
+    type_into(&mut h, "Name", "versuch");
+    h.get_by_label("Anlegen").click();
+    settle(&mut h);
+    assert_eq!(head_branch(h.state()), "versuch");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut h);
+    h.get_by_label("Rückgängig machen").click();
+    settle(&mut h);
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(head_branch(h.state()), "main");
+    assert!(
+        !h.state()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .refs
+            .iter()
+            .any(|r| r.name == "versuch")
+    );
 }

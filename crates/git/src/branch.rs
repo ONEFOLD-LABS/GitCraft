@@ -180,6 +180,11 @@ impl Repository {
         }
     }
 
+    /// The commit a ref or revision names.
+    pub fn resolve_commit(&self, rev: &str) -> Result<Oid, GitError> {
+        self.resolve(rev)
+    }
+
     fn resolve(&self, rev: &str) -> Result<Oid, GitError> {
         let spec = format!("{rev}^{{commit}}");
         let out = self.read([
