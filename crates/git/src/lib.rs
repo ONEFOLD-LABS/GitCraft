@@ -9,6 +9,7 @@
 
 mod command_log;
 mod diff;
+mod discard;
 mod display;
 mod error;
 mod log;
@@ -22,6 +23,7 @@ mod trust;
 
 pub use command_log::{CommandLog, LogEntry, redact};
 pub use diff::{ChangedFile, FileDiff, FileStatus, Hunk, Line, LineKind, MAX_LINES};
+pub use discard::{DISCARDED_REFS, Discarded};
 pub use display::{escape, escape_bytes};
 pub use error::GitError;
 pub use log::{Commit, LogReader, Signature};

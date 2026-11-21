@@ -8,6 +8,7 @@
 mod avatars;
 mod commit;
 mod diffview;
+mod discard;
 mod history;
 pub mod i18n;
 mod search;
@@ -22,13 +23,14 @@ use std::sync::Arc;
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_core::{Command, DiffKey, Event, Outcome, RepoSession, Snapshot, Task, Wake};
 use gitcraft_git::{
-    Change, ChangedFile, Conflict, FileChange, FileStatus, GitError, GitRunner, GitVersion, Head,
-    MIN_VERSION, Oid, RepoPath, Status, escape,
+    Change, ChangedFile, Conflict, Discarded, FileChange, FileStatus, GitError, GitRunner,
+    GitVersion, Head, MIN_VERSION, Oid, RepoPath, Status, escape,
 };
 
 use crate::avatars::Avatars;
 use crate::commit::{CommitForm, FormAction};
 use crate::diffview::{DiffAction, Prepared, Side};
+use crate::discard::{Confirm, Pending};
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
 use crate::search::{BarAction, Search};
@@ -106,6 +108,8 @@ enum Row {
         diff: Option<DiffKey>,
         /// What a double click or the row's button does (none for conflicts).
         stage: Option<StageOp>,
+        /// Discarding (tracked) or deleting (untracked) from the context menu.
+        discard: Option<Pending>,
     },
 }
 
@@ -152,6 +156,13 @@ pub struct RepoWindow {
     commit: CommitForm,
     /// Commit messages not committed yet, per repository (working tree).
     drafts: std::collections::HashMap<PathBuf, (String, String)>,
+    /// A destructive command waiting for confirmation.
+    confirm: Option<Confirm>,
+    /// What the last discard, delete or restore did, with the saved state that undoes it.
+    notice: Option<(String, Option<String>)>,
+    /// Saved states of discarded and deleted files, newest first.
+    discarded: Vec<Discarded>,
+    show_discarded: bool,
     /// The error shown came from a read; the next good snapshot clears it.
     read_error: bool,
     /// A write waiting for the user to trust the repository (the trust dialog is open).
@@ -192,6 +203,10 @@ impl RepoWindow {
             commit: CommitForm::default(),
             drafts: std::collections::HashMap::new(),
             read_error: false,
+            confirm: None,
+            notice: None,
+            discarded: Vec::new(),
+            show_discarded: false,
             trust_prompt: None,
             read_only: false,
             opening: None,
@@ -332,6 +347,14 @@ impl RepoWindow {
             self.commit.body = body;
         }
         session.submit(Command::Identity);
+        self.confirm = None;
+        self.notice = None;
+        self.discarded.clear();
+        if session.is_trusted() {
+            let keep = i64::from(self.settings.discard_days).saturating_mul(24 * 3600);
+            session.submit(Command::PruneDiscarded(keep));
+        }
+        session.submit(Command::ListDiscarded);
         if !session.is_trusted()
             && self.settings.is_trusted(
                 session.workdir(),
@@ -475,6 +498,34 @@ impl RepoWindow {
                 }
             }
             (Command::AmendInfo, Ok(Outcome::AmendInfo(info))) => self.commit.set_amend_info(info),
+            (Command::CountLines(_), Ok(Outcome::Lines(n))) => {
+                if let Some(c) = self.confirm.as_mut() {
+                    c.lines = Some(n);
+                }
+            }
+            (Command::ListDiscarded, Ok(Outcome::Discarded(list))) => self.discarded = list,
+            (command, Ok(Outcome::Saved(id))) => {
+                let text = match &command {
+                    Command::Discard(p) if p.len() == 1 => tr("1 Datei verworfen.").to_owned(),
+                    Command::Discard(p) => trf("{n} Dateien verworfen.", &[("n", &p.len())]),
+                    Command::DiscardLines { .. } => tr("Zeilen verworfen.").to_owned(),
+                    Command::DeleteUntracked(p) if p.len() == 1 => {
+                        tr("1 Datei gelöscht.").to_owned()
+                    }
+                    Command::DeleteUntracked(p) => trf("{n} Dateien gelöscht.", &[("n", &p.len())]),
+                    _ => tr("Wiederhergestellt.").to_owned(),
+                };
+                self.notice = Some((text, Some(id)));
+                self.error = None;
+                if let Some(session) = &self.session {
+                    session.submit(Command::ListDiscarded);
+                }
+            }
+            (Command::PruneDiscarded(_), Ok(_)) => {
+                if let Some(session) = &self.session {
+                    session.submit(Command::ListDiscarded);
+                }
+            }
             (Command::Refresh, Err(e)) => {
                 self.error = Some(error_text(&e));
                 self.read_error = true;
@@ -513,6 +564,21 @@ impl RepoWindow {
         self.settings_window(&ctx);
         self.keys_window(&ctx);
         self.trust_dialog(&ctx);
+        self.confirm_dialog(&ctx);
+        if self.show_discarded {
+            let mut open = true;
+            let restore = discard::discarded_window(
+                &ctx,
+                &mut open,
+                t,
+                &self.discarded,
+                self.settings.discard_days,
+            );
+            self.show_discarded = open;
+            if let Some(id) = restore {
+                self.write(Command::RestoreDiscarded(id));
+            }
+        }
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
         if let Some(error) = &self.error {
@@ -526,6 +592,38 @@ impl RepoWindow {
                         ui.label(RichText::new(error).color(t.error_text));
                     });
             });
+        }
+        let mut undo = None;
+        let mut close_notice = false;
+        if let Some((text, saved)) = &self.notice {
+            egui::Panel::top("hinweis").show(ui, |ui| {
+                egui::Frame::new()
+                    .fill(t.toolbar_bg)
+                    .inner_margin(6)
+                    .corner_radius(4)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(text).color(t.text_strong));
+                            // Not "Rückgängig": that is the toolbar's undo.
+                            if let Some(id) = saved
+                                && ui.button(tr("Wiederherstellen")).clicked()
+                            {
+                                undo = Some(id.clone());
+                            }
+                            if ui.small_button(tr("Schließen")).clicked() {
+                                close_notice = true;
+                            }
+                        });
+                    });
+            });
+        }
+        if close_notice {
+            self.notice = None;
+        }
+        if let Some(id) = undo {
+            self.notice = None;
+            self.write(Command::RestoreDiscarded(id));
         }
         egui::Panel::bottom("statuszeile")
             .exact_size(22.0)
@@ -641,7 +739,12 @@ impl RepoWindow {
                     DiffKey::Worktree { staged: true, .. } => Some(Side::Staged),
                     _ => None,
                 };
-                prepared.show(ui, t, op.as_ref().map(StageOp::label), side)
+                let discard = match &state.key {
+                    DiffKey::Worktree { staged: false, .. } => Some("Verwerfen …"),
+                    DiffKey::Untracked { .. } => Some("Löschen …"),
+                    _ => None,
+                };
+                prepared.show(ui, t, op.as_ref().map(StageOp::label), side, discard)
             }
             (None, None) => {
                 let action = back(ui);
@@ -657,6 +760,43 @@ impl RepoWindow {
             DiffAction::Act => {
                 if let Some(op) = op {
                     self.stage(op);
+                }
+            }
+            DiffAction::Discard => {
+                let pending = self.diff.as_ref().and_then(|state| match &state.key {
+                    DiffKey::Worktree {
+                        path,
+                        staged: false,
+                        ..
+                    } => Some(Pending::Files(vec![path.clone()])),
+                    DiffKey::Untracked { path } => Some(Pending::Delete(vec![path.clone()])),
+                    _ => None,
+                });
+                if let Some(p) = pending {
+                    self.ask(p);
+                }
+            }
+            DiffAction::DiscardLines(lines) => {
+                let pending =
+                    self.diff
+                        .as_ref()
+                        .and_then(|state| match (&state.key, &state.prepared) {
+                            (
+                                DiffKey::Worktree {
+                                    path,
+                                    staged: false,
+                                    ..
+                                },
+                                Some(prepared),
+                            ) => Some(Pending::Lines {
+                                path: path.clone(),
+                                shown: Box::new(prepared.diff.clone()),
+                                lines,
+                            }),
+                            _ => None,
+                        });
+                if let Some(p) = pending {
+                    self.ask(p);
                 }
             }
             DiffAction::Lines(lines) => {
@@ -880,6 +1020,30 @@ impl RepoWindow {
         });
     }
 
+    /// Asks before discarding or deleting; counts the lines that would be lost meanwhile.
+    fn ask(&mut self, pending: Pending) {
+        if let (Pending::Files(paths), Some(session)) = (&pending, &self.session) {
+            session.submit(Command::CountLines(paths.clone()));
+        }
+        self.confirm = Some(Confirm::new(pending));
+    }
+
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = &self.confirm else {
+            return;
+        };
+        let t = theme::tokens(ctx);
+        match confirm.show(ctx, t, self.settings.discard_days) {
+            Some(true) => {
+                let command = confirm.command();
+                self.confirm = None;
+                self.write(command);
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
+    }
+
     /// Asks whether the open repository may run the programs its configuration names, before
     /// the first write (docs/security.md T1). Esc or a click outside keeps the write from
     /// running and asks again next time.
@@ -974,6 +1138,14 @@ impl RepoWindow {
                     .color(t.text_dim),
                 );
                 ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let label = ui.label(tr("Verworfene Inhalte aufbewahren (Tage)"));
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut self.settings.discard_days).range(1..=365))
+                        .labelled_by(label.id)
+                        .changed();
+                });
+                ui.add_space(10.0);
                 ui.label(RichText::new(tr("Vertraute Repositories")).color(t.text_strong));
                 ui.label(
                     RichText::new(tr(
@@ -1032,6 +1204,18 @@ impl RepoWindow {
                 ui.label(RichText::new(text).color(t.text_dim));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !self.discarded.is_empty() {
+                    if ui
+                        .link(trf(
+                            "Zuletzt verworfen ({n})",
+                            &[("n", &self.discarded.len())],
+                        ))
+                        .clicked()
+                    {
+                        self.show_discarded = true;
+                    }
+                    ui.label(RichText::new("·").color(t.text_dim));
+                }
                 if let Some(v) = self.git_version {
                     ui.label(RichText::new(format!("git {v}")).color(t.text_dim));
                     ui.label(RichText::new("·").color(t.text_dim));
@@ -1385,6 +1569,7 @@ impl RepoWindow {
         let current = self.diff.as_ref().map(|s| s.key.clone());
         let mut open: Option<(DiffKey, String)> = None;
         let mut op: Option<StageOp> = None;
+        let mut ask: Option<Pending> = None;
         let rows = &self.rows;
         egui::ScrollArea::vertical()
             .id_salt("changes")
@@ -1420,7 +1605,7 @@ impl RepoWindow {
                                 draw_row(ui, row, t);
                             });
                         }
-                        Row::File { diff, stage, path, .. } => {
+                        Row::File { diff, stage, path, discard, .. } => {
                             if let Some(stage) = stage
                                 && hot
                                 && cell.small_button(tr(stage.label())).clicked()
@@ -1445,6 +1630,16 @@ impl RepoWindow {
                                     op = Some(stage.clone());
                                     ui.close();
                                 }
+                                if let Some(d) = discard {
+                                    let label = match d {
+                                        Pending::Delete(_) => "Löschen …",
+                                        _ => "Verwerfen …",
+                                    };
+                                    if ui.button(RichText::new(tr(label)).color(t.deleted)).clicked() {
+                                        ask = Some(d.clone());
+                                        ui.close();
+                                    }
+                                }
                                 if ui.button(tr("Pfad kopieren")).clicked() {
                                     // The file's own path, also for a rename ("old -> new").
                                     let copied = match diff {
@@ -1467,6 +1662,9 @@ impl RepoWindow {
         }
         if let Some(op) = op {
             self.stage(op);
+        }
+        if let Some(p) = ask {
+            self.ask(p);
         }
     }
 
@@ -1769,6 +1967,7 @@ fn change_row(file: &FileChange, change: Change, staged: bool) -> Row {
             old: file.orig_path.clone(),
             staged,
         }),
+        discard: (!staged).then(|| Pending::Files(vec![file.path.clone()])),
         stage: Some(if staged {
             StageOp::Unstage(paths)
         } else {
@@ -1828,6 +2027,7 @@ fn rows(status: &Status) -> Vec<Row> {
                 meaning: conflict_meaning(c),
                 diff: None,
                 stage: None,
+                discard: None,
                 path: f.path.display(),
             })
             .collect(),
@@ -1840,6 +2040,7 @@ fn rows(status: &Status) -> Vec<Row> {
             path: f.path.clone(),
         }),
         stage: Some(StageOp::Stage(vec![f.path.clone()])),
+        discard: Some(Pending::Delete(vec![f.path.clone()])),
         path: f.path.display(),
     });
     section(
@@ -1906,6 +2107,10 @@ fn error_text(e: &GitError) -> String {
             &[("schluessel", &escape(key))],
         ),
         GitError::Cancelled => tr("Abgebrochen.").to_owned(),
+        GitError::UnsafePath(p) => trf(
+            "GitCraft ändert diesen Pfad nicht: {pfad}",
+            &[("pfad", &escape(p))],
+        ),
         GitError::Stale => tr("Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.").to_owned(),
         GitError::InvalidValue(v) => trf(
             "Ungültige Eingabe: {wert}",

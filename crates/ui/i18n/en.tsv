@@ -98,7 +98,6 @@ Remote	Remote
 Repository	Repository
 Repository öffnen	Open repository
 Repository öffnen …	Open repository …
-Rückgängig	Undo
 Schließen	Close
 Stash	Stash
 Stashes	Stashes
@@ -190,3 +189,37 @@ Enter	Enter
 Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.	The file changed since its diff was shown; nothing was applied. The diff has been reloaded.
 Pfeil hoch/runter, Shift+Pfeil, Enter	Arrow up/down, Shift+arrow, Enter
 Zeilen im Diff wählen und vormerken	Select lines in a diff and stage them
+1 Datei gelöscht.	1 file deleted.
+1 Datei verworfen.	Changes to 1 file discarded.
+1 Zeile	1 line
+Abbrechen	Cancel
+Auswahl verwerfen ({n}) …	Discard selection ({n}) …
+Dateien löschen?	Delete files?
+GitCraft sichert die Inhalte vorher; unter „Zuletzt verworfen“ lassen sie sich {tage} Tage lang wiederherstellen.	GitCraft saves the contents first; they can be restored under "Recently discarded" for {tage} days.
+GitCraft ändert diesen Pfad nicht: {pfad}	GitCraft does not change this path: {pfad}
+Löschen	Delete
+Verwerfen	Discard
+Verwirft 1 geänderte Zeile in {datei}.	Discards 1 changed line in {datei}.
+Verwirft {n} geänderte Zeilen in {datei}.	Discards {n} changed lines in {datei}.
+Verworfene Inhalte aufbewahren (Tage)	Keep discarded contents (days)
+Verworfene und gelöschte Inhalte der letzten {tage} Tage.	Discarded and deleted contents of the last {tage} days.
+Wiederhergestellt.	Restored.
+Wiederherstellen	Restore
+Zeilen verwerfen?	Discard lines?
+Zeilen verworfen.	Lines discarded.
+Zuletzt verworfen	Recently discarded
+Zuletzt verworfen ({n})	Recently discarded ({n})
+und {n} weitere	and {n} more
+{datei} (war gelöscht)	{datei} (was deleted)
+{n} Dateien gelöscht.	{n} files deleted.
+{n} Dateien verworfen.	Changes to {n} files discarded.
+{n} Zeilen	{n} lines
+Änderungen verwerfen?	Discard changes?
+… Zeilen	… lines
+Verwirft die Änderungen an 1 Datei ({zeilen}).	Discards the changes to 1 file ({zeilen}).
+Verwirft die Änderungen an {n} Dateien ({zeilen}).	Discards the changes to {n} files ({zeilen}).
+Löscht 1 unversionierte Datei.	Deletes 1 untracked file.
+Löscht {n} unversionierte Dateien.	Deletes {n} untracked files.
+Verwerfen …	Discard …
+Löschen …	Delete …
+Rückgängig	Undo

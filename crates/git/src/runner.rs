@@ -194,7 +194,7 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let (child, call) = self.spawn(cwd, config, args, Mode::Read, false)?;
+        let (child, call) = self.spawn(cwd, config, args, Mode::Read, false, &[])?;
         collect(child, &call, None, Some(READ_TIMEOUT), None).map(|(out, _)| out)
     }
 
@@ -213,10 +213,28 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.write_env(cwd, config, args, input, cancel, &[])
+    }
+
+    /// Like [`GitRunner::write`] with extra environment variables for this call (e.g. a
+    /// temporary `GIT_INDEX_FILE`).
+    pub(crate) fn write_env<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+        input: Option<&[u8]>,
+        cancel: &Cancel,
+        env: &[(&str, &OsStr)],
+    ) -> Result<Written, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         if cancel.is_cancelled() {
             return Err(GitError::Cancelled);
         }
-        let (child, call) = self.spawn(cwd, config, args, Mode::Write, input.is_some())?;
+        let (child, call) = self.spawn(cwd, config, args, Mode::Write, input.is_some(), env)?;
         let (stdout, stderr) = collect(
             child,
             &call,
@@ -242,7 +260,7 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let (mut child, call) = self.spawn(cwd, config, args, Mode::Read, false)?;
+        let (mut child, call) = self.spawn(cwd, config, args, Mode::Read, false, &[])?;
         let stdout = child.stdout.take().map(std::io::BufReader::new);
         let stderr = child
             .stderr
@@ -265,6 +283,7 @@ impl GitRunner {
         args: I,
         mode: Mode,
         stdin: bool,
+        extra_env: &[(&str, &OsStr)],
     ) -> Result<(Child, Call), GitError>
     where
         I: IntoIterator<Item = S>,
@@ -313,6 +332,9 @@ impl GitRunner {
             }
         }
         for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        for (k, v) in extra_env {
             cmd.env(k, v);
         }
         #[cfg(unix)]

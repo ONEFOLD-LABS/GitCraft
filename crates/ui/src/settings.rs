@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 const FILE: &str = "settings.json";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Load author images from Gravatar (sends a hash of each author's e-mail address; off by
@@ -20,6 +20,18 @@ pub struct Settings {
     pub avatars: bool,
     /// Repositories whose program settings the user trusts (docs/security.md T1).
     pub trusted: Vec<TrustedRepo>,
+    /// Days that discarded and deleted contents stay restorable.
+    pub discard_days: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            avatars: false,
+            trusted: Vec::new(),
+            discard_days: 14,
+        }
+    }
 }
 
 /// A repository the user trusts, with what it would run at that time: when its settings or
