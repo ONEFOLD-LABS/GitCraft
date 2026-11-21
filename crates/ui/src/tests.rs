@@ -301,6 +301,17 @@ fn texts_behind_variables_are_translated() {
     ];
     texts.extend(toolbar::ACTIONS.map(|(_, label, _)| label));
     texts.extend(search::Kind::ALL.map(search::Kind::label));
+    texts.extend([
+        "Repository öffnen",
+        "Status neu lesen",
+        "Historie durchsuchen",
+        "Nächster / vorheriger Treffer",
+        "Commit wählen",
+        "Commit-ID kopieren",
+        "Diff oder Suche schließen",
+        "Zoom",
+        "Diese Übersicht",
+    ]);
     texts.extend(
         [
             C::BothModified,
@@ -408,6 +419,9 @@ fn history_with_branches_labels_and_keyboard() {
     let mut w = f.window();
     w.select_commit(head);
     shot("history-commit-dark", ThemePreference::Dark, w);
+    let mut w = f.window();
+    w.show_keys = true;
+    shot("keys-light", ThemePreference::Light, w);
 }
 
 /// The settings window explains what the avatar switch sends; switching it saves the file and
