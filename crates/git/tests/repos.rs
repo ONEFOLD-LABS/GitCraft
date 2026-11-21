@@ -1777,3 +1777,54 @@ fn tags_lightweight_annotated_delete_restore() {
         "exists already"
     );
 }
+
+#[test]
+fn compare_diverged_branches() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    repo.create_branch("feature", "main", true, &c).unwrap();
+    f.write("feature.txt", "neu");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Feature", false, false, &c).unwrap();
+    repo.switch_branch("main", &c).unwrap();
+    f.write("a.txt", "3\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Drei auf main", false, false, &c).unwrap();
+
+    let cmp = repo
+        .compare("refs/heads/main", "refs/heads/feature")
+        .unwrap();
+    let subj = |v: &[gitcraft_git::Commit]| v.iter().map(|c| c.subject.clone()).collect::<Vec<_>>();
+    assert_eq!(subj(&cmp.only_a), ["Drei auf main"]);
+    assert_eq!(subj(&cmp.only_b), ["Feature"]);
+    let files: Vec<String> = cmp.files.iter().map(|x| x.path.display()).collect();
+    assert_eq!(
+        files,
+        ["feature.txt"],
+        "from the merge base, not from main's tip"
+    );
+    let base = cmp.base.clone().unwrap();
+    let d = repo
+        .range_diff(base.as_str(), "refs/heads/feature", &cmp.files[0])
+        .unwrap();
+    assert_eq!((d.added(), d.new_file), (1, true));
+
+    // No common history.
+    f.git(&["checkout", "-q", "--orphan", "fremd"]);
+    f.git(&["rm", "-rq", "--cached", "."]);
+    f.write("x.txt", "x");
+    f.git(&["add", "x.txt"]);
+    f.git(&[
+        "-c",
+        "user.name=T",
+        "-c",
+        "user.email=t@invalid",
+        "commit",
+        "-qm",
+        "Fremd",
+    ]);
+    let cmp = repo.compare("refs/heads/main", "refs/heads/fremd").unwrap();
+    assert_eq!(cmp.base, None);
+    assert!(cmp.files.is_empty());
+    assert_eq!(subj(&cmp.only_b), ["Fremd"]);
+}

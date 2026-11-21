@@ -352,6 +352,8 @@ fn texts_behind_variables_are_translated() {
         "Neuer Tag",
         "Tag löschen?",
         "Die Nachricht fehlt.",
+        "Was {b} seit der gemeinsamen Basis {basis} ändert (1 Datei)",
+        "Was {b} seit der gemeinsamen Basis {basis} ändert ({n} Dateien)",
         "Der Name fehlt.",
         "Ein Name darf nicht mit „-“ beginnen.",
         "Ein Name darf keine Leerzeichen enthalten.",
@@ -1443,4 +1445,40 @@ fn tags_are_created_deleted_and_restored() {
     h.get_by_label("Wiederherstellen").click();
     settle(&mut h);
     assert_eq!(tag_names(h.state()), ["v1.0"]);
+}
+
+/// Comparing HEAD with a diverged branch lists both sides and opens a file's diff.
+#[test]
+fn compare_with_a_branch() {
+    let f = two_commit_fixture();
+    assert!(f.git(&["checkout", "-q", "-b", "feature"]));
+    f.write("neu.txt", "n\n");
+    f.commit_all("Feature");
+    assert!(f.git(&["checkout", "-q", "main"]));
+    f.write("a.txt", "3\n");
+    f.commit_all("Drei");
+    let mut h = harness(f.window());
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "feature")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Mit HEAD vergleichen").click();
+    settle(&mut h);
+    h.get_by_label("Nur in main (1)");
+    h.get_by_label("Nur in feature (1)");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("compare-dark.png")).unwrap();
+    }
+    h.get_by_label("neu.txt").click();
+    settle(&mut h);
+    assert!(matches!(
+        h.state().diff.as_ref().map(|d| &d.key),
+        Some(DiffKey::Range { .. })
+    ));
+    assert!(h.state().diff.as_ref().unwrap().prepared.is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().diff.is_none() && h.state().compare.is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().compare.is_none());
 }

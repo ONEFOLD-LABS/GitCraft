@@ -9,6 +9,7 @@ mod avatars;
 mod branches;
 mod cmdlog;
 mod commit;
+mod compare;
 mod diffview;
 mod discard;
 mod history;
@@ -166,6 +167,8 @@ pub struct RepoWindow {
     confirm: Option<Confirm>,
     /// What the last discard, delete or restore did, with the saved state that undoes it.
     notice: Option<(String, Option<Command>)>,
+    /// Two refs compared in the centre.
+    compare: Option<compare::CompareView>,
     /// A commit shown that is not in the loaded history (a stash).
     extra_commit: Option<gitcraft_git::Commit>,
     /// An open branch dialog.
@@ -218,6 +221,7 @@ impl RepoWindow {
             notice: None,
             branch_dialog: None,
             extra_commit: None,
+            compare: None,
             discarded: Vec::new(),
             show_discarded: false,
             trust_prompt: None,
@@ -595,6 +599,15 @@ impl RepoWindow {
                     Some(Command::StashStore { id, message }),
                 ));
             }
+            (Command::Compare { a, b }, result) => {
+                if let Some(view) = self.compare.as_mut().filter(|v| v.a == a && v.b == b) {
+                    view.result = Some(match result {
+                        Ok(Outcome::Comparison(c)) => Ok(*c),
+                        Ok(_) => Err(String::new()),
+                        Err(e) => Err(error_text(&e)),
+                    });
+                }
+            }
             (Command::LoadCommit(_), Ok(Outcome::Commit(commit))) => {
                 let id = commit.id.clone();
                 self.extra_commit = Some(*commit);
@@ -805,6 +818,26 @@ impl RepoWindow {
                             focus: true,
                         });
                     }
+                    Some(Pick::Compare { target, label }) => {
+                        if let Some(session) = &self.session {
+                            session.submit(Command::Compare {
+                                a: "HEAD".into(),
+                                b: target.clone(),
+                            });
+                        }
+                        let a_label = self
+                            .status()
+                            .map(|s| branch_name(&s.head))
+                            .unwrap_or_else(|| "HEAD".into());
+                        self.diff = None;
+                        self.compare = Some(compare::CompareView {
+                            a: "HEAD".into(),
+                            b: target,
+                            a_label,
+                            b_label: label,
+                            result: None,
+                        });
+                    }
                     Some(Pick::NewTag { target, label }) => {
                         self.branch_dialog = Some(tag_dialog(target, label));
                     }
@@ -847,6 +880,8 @@ impl RepoWindow {
         egui::CentralPanel::default().show(ui, |ui| {
             if self.diff.is_some() {
                 self.diff_view(ui);
+            } else if self.compare.is_some() {
+                self.compare_view(ui);
             } else {
                 self.history_view(ui);
             }
@@ -1010,12 +1045,14 @@ impl RepoWindow {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
-        if (self.diff.is_some() || self.search.open)
+        if (self.diff.is_some() || self.compare.is_some() || self.search.open)
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            // The innermost first: an open diff, then the search.
+            // The innermost first: an open diff, then a comparison, then the search.
             if self.diff.is_some() {
                 self.diff = None;
+            } else if self.compare.is_some() {
+                self.compare = None;
             } else {
                 self.search.close();
             }
@@ -1239,6 +1276,36 @@ impl RepoWindow {
                 }
             });
         });
+    }
+
+    fn compare_view(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
+        let Some(view) = &self.compare else {
+            return;
+        };
+        match view.show(ui, t) {
+            Some(compare::CompareAction::Back) => self.compare = None,
+            Some(compare::CompareAction::Commit(c)) => {
+                let id = c.id.clone();
+                if self.history.commit(&id).is_none() {
+                    self.extra_commit = Some(*c);
+                }
+                self.selection = Selection::Commit(id);
+            }
+            Some(compare::CompareAction::File { base, file }) => {
+                let title = file.path.display();
+                let to = view.b.clone();
+                self.open_diff(
+                    DiffKey::Range {
+                        from: base,
+                        to,
+                        file,
+                    },
+                    title,
+                );
+            }
+            None => {}
+        }
     }
 
     /// A commit from the loaded history, or the extra one shown (a stash).
@@ -2005,7 +2072,7 @@ impl RepoWindow {
         let follow = self.diff.as_ref().and_then(|state| {
             let path = match &state.key {
                 DiffKey::Worktree { path, .. } | DiffKey::Untracked { path } => path,
-                DiffKey::Commit { .. } => return None,
+                DiffKey::Commit { .. } | DiffKey::Range { .. } => return None,
             };
             paths
                 .contains(path)
@@ -2116,7 +2183,7 @@ impl RepoWindow {
 /// Staging the file a diff shows: stage a working-tree or untracked diff, unstage a staged one.
 fn diff_stage_op(key: &DiffKey) -> Option<StageOp> {
     match key {
-        DiffKey::Commit { .. } => None,
+        DiffKey::Commit { .. } | DiffKey::Range { .. } => None,
         DiffKey::Worktree { path, old, staged } => {
             let paths: Vec<RepoPath> = std::iter::once(path.clone()).chain(old.clone()).collect();
             Some(if *staged {
@@ -2132,7 +2199,7 @@ fn diff_stage_op(key: &DiffKey) -> Option<StageOp> {
 /// The diff of the same file on the other side of the index, after staging or unstaging it.
 fn moved_key(key: &DiffKey) -> Option<DiffKey> {
     match key {
-        DiffKey::Commit { .. } => None,
+        DiffKey::Commit { .. } | DiffKey::Range { .. } => None,
         DiffKey::Worktree { path, old, staged } => Some(DiffKey::Worktree {
             path: path.clone(),
             old: old.clone(),

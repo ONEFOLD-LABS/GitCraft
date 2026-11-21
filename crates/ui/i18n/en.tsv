@@ -300,3 +300,11 @@ Die Nachricht fehlt.	The message is missing.
 Löscht den Tag {name} in diesem Repository. Der Commit bleibt erhalten; „Wiederherstellen“ legt den Tag danach wieder an.	Deletes the tag {name} in this repository. The commit remains; "Restore" creates the tag again afterwards.
 Tag hier anlegen …	Create tag here …
 Tag {name} gelöscht.	Tag {name} deleted.
+Mit HEAD vergleichen	Compare with HEAD
+{a} verglichen mit {b}	{a} compared with {b}
+Vergleiche …	Comparing …
+Nur in {name} ({n})	Only in {name} ({n})
+nur die neuesten {n}	only the newest {n}
+Keine gemeinsame Geschichte: es gibt keine Basis für einen Vergleich der Dateien.	No common history: there is no base to compare the files.
+Was {b} seit der gemeinsamen Basis {basis} ändert ({n} Dateien)	What {b} changes since the common base {basis} ({n} files)
+Was {b} seit der gemeinsamen Basis {basis} ändert (1 Datei)	What {b} changes since the common base {basis} (1 file)
