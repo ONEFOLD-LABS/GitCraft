@@ -340,6 +340,7 @@ fn texts_behind_variables_are_translated() {
         "Zeilen im Diff wählen und vormerken",
         "Verwerfen …",
         "Löschen …",
+        "Befehlsprotokoll ein/aus",
         "Verwirft die Änderungen an 1 Datei ({zeilen}).",
         "Verwirft die Änderungen an {n} Dateien ({zeilen}).",
         "Löscht 1 unversionierte Datei.",
@@ -1087,4 +1088,50 @@ fn delete_untracked_and_restore_from_the_list() {
     h.get_by_label("Wiederherstellen").click();
     settle(&mut h);
     assert_eq!(file_text(&f, "neu/notiz.txt").as_deref(), Some("wichtig"));
+}
+
+/// The command log lists the calls, filters writes and copies a line that runs in a shell.
+#[test]
+fn command_log_shows_and_copies_calls() {
+    let f = Fixture::new();
+    f.write("a b.txt", "1");
+    let mut h = harness(f.window());
+    h.get_by_label("Alle vormerken").click();
+    settle(&mut h);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::L,
+    );
+    settle(&mut h);
+    assert!(h.state().log_panel.open);
+    let add = "git -c core.fsmonitor=false --literal-pathspecs add --all --pathspec-from-file=- --pathspec-file-nul";
+    #[cfg(unix)]
+    {
+        h.get_by_role_and_label(egui::accesskit::Role::Button, add)
+            .click();
+        h.step();
+        let copied = h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(text) if text == add));
+        assert!(copied, "the clicked line was copied");
+    }
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("command-log-dark.png"))
+            .unwrap();
+    }
+    h.get_by_label("Nur ändernde Befehle").click();
+    settle(&mut h);
+    assert!(
+        h.query_by_label_contains("status --porcelain").is_none(),
+        "reads are hidden"
+    );
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::L,
+    );
+    settle(&mut h);
+    assert!(!h.state().log_panel.open);
 }
