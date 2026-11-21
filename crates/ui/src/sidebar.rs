@@ -22,6 +22,13 @@ pub(crate) enum Pick {
     },
     Rename(String),
     Delete(String),
+    /// Show a stash like a commit.
+    Stash(Stash),
+    ApplyStash {
+        stash: Stash,
+        pop: bool,
+    },
+    DropStash(Stash),
 }
 
 /// Sidebar state that outlives a frame.
@@ -112,13 +119,47 @@ impl Sidebar {
                     .default_open(false)
                     .show(ui, |ui| {
                         for s in stashes {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(escape(&s.message)).color(t.text_dim),
+                            let resp = ui
+                                .add(
+                                    egui::Button::selectable(
+                                        false,
+                                        RichText::new(escape(&s.message)),
+                                    )
+                                    .truncate(),
                                 )
-                                .truncate(),
-                            )
-                            .on_hover_text(escape(&s.selector));
+                                .on_hover_text(format!(
+                                    "{}\n{}",
+                                    escape(&s.selector),
+                                    tr("Doppelklick wendet ihn an")
+                                ));
+                            if resp.double_clicked() {
+                                picked = Some(Pick::ApplyStash {
+                                    stash: s.clone(),
+                                    pop: false,
+                                });
+                            } else if resp.clicked() {
+                                picked = Some(Pick::Stash(s.clone()));
+                            }
+                            resp.context_menu(|ui| {
+                                if ui.button(tr("Anwenden")).clicked() {
+                                    picked = Some(Pick::ApplyStash {
+                                        stash: s.clone(),
+                                        pop: false,
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button(tr("Anwenden und entfernen (Pop)")).clicked() {
+                                    picked = Some(Pick::ApplyStash {
+                                        stash: s.clone(),
+                                        pop: true,
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button(tr("Löschen …")).clicked() {
+                                    picked = Some(Pick::DropStash(s.clone()));
+                                    ui.close();
+                                }
+                            });
                         }
                     });
             });

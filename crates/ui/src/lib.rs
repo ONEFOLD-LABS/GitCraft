@@ -166,6 +166,8 @@ pub struct RepoWindow {
     confirm: Option<Confirm>,
     /// What the last discard, delete or restore did, with the saved state that undoes it.
     notice: Option<(String, Option<Command>)>,
+    /// A commit shown that is not in the loaded history (a stash).
+    extra_commit: Option<gitcraft_git::Commit>,
     /// An open branch dialog.
     branch_dialog: Option<branches::Dialog>,
     /// Saved states of discarded and deleted files, newest first.
@@ -215,6 +217,7 @@ impl RepoWindow {
             confirm: None,
             notice: None,
             branch_dialog: None,
+            extra_commit: None,
             discarded: Vec::new(),
             show_discarded: false,
             trust_prompt: None,
@@ -548,8 +551,48 @@ impl RepoWindow {
                     }),
                 ));
             }
-            (_, Err(GitError::WouldOverwrite(files))) => {
-                self.branch_dialog = Some(branches::Dialog::Overwrite { files });
+            (command, Err(GitError::WouldOverwrite(files))) => {
+                let target = match command {
+                    Command::SwitchBranch(name) => Some(branches::Target::Branch(name)),
+                    Command::SwitchDetached(id) => Some(branches::Target::Commit(id)),
+                    _ => None,
+                };
+                self.branch_dialog = Some(branches::Dialog::Overwrite { files, target });
+            }
+            (Command::StashPush { .. }, Ok(Outcome::Stashed(any))) => {
+                self.error = None;
+                self.notice = Some((
+                    if any {
+                        tr("Änderungen geparkt. „Pop“ holt sie zurück.").to_owned()
+                    } else {
+                        tr("Nichts zu parken.").to_owned()
+                    },
+                    None,
+                ));
+            }
+            (Command::StashApply { pop, .. }, Ok(_)) => {
+                self.error = None;
+                self.notice = Some((
+                    if pop {
+                        tr("Stash angewendet und entfernt.").to_owned()
+                    } else {
+                        tr("Stash angewendet.").to_owned()
+                    },
+                    None,
+                ));
+            }
+            (Command::StashDrop { id, message, .. }, Ok(_)) => {
+                self.error = None;
+                self.notice = Some((
+                    trf("Stash gelöscht ({id}).", &[("id", &id.short())]),
+                    Some(Command::StashStore { id, message }),
+                ));
+            }
+            (Command::LoadCommit(_), Ok(Outcome::Commit(commit))) => {
+                let id = commit.id.clone();
+                self.extra_commit = Some(*commit);
+                self.diff = None;
+                self.selection = Selection::Commit(id);
             }
             (command, Ok(Outcome::Saved(id))) => {
                 let text = match &command {
@@ -755,6 +798,25 @@ impl RepoWindow {
                             focus: true,
                         });
                     }
+                    Some(Pick::Stash(stash)) => {
+                        if let Some(session) = &self.session {
+                            session.submit(Command::LoadCommit(stash.id));
+                        }
+                    }
+                    Some(Pick::ApplyStash { stash, pop }) => {
+                        self.write(Command::StashApply {
+                            selector: stash.selector,
+                            id: stash.id,
+                            pop,
+                        });
+                    }
+                    Some(Pick::DropStash(stash)) => {
+                        self.branch_dialog = Some(branches::Dialog::DropStash {
+                            selector: stash.selector,
+                            id: stash.id,
+                            message: stash.message,
+                        });
+                    }
                     Some(Pick::Delete(name)) => {
                         if let Some(session) = &self.session {
                             session.submit(Command::BranchLoss(name.clone()));
@@ -787,8 +849,7 @@ impl RepoWindow {
         if self.details.as_ref().is_some_and(|d| &d.id == id) {
             return;
         }
-        let (Some(session), Some(commit)) = (&self.session, self.history.commit(id).cloned())
-        else {
+        let (Some(session), Some(commit)) = (&self.session, self.find_commit(id)) else {
             return;
         };
         session.submit(Command::CommitDetails(Box::new(commit)));
@@ -1075,13 +1136,45 @@ impl RepoWindow {
                 .and_then(|s| s.upstream.as_ref())
                 .and_then(|u| u.ahead_behind)
                 .map_or((0, 0), |(a, b)| (b, a));
-            let ready: &[toolbar::Icon] = if self.session.is_some() {
-                &[toolbar::Icon::Branch]
-            } else {
-                &[]
-            };
-            if toolbar::actions(ui, t, behind, ahead, ready) == Some(toolbar::Icon::Branch) {
-                self.new_branch_here();
+            let mut ready = Vec::new();
+            if self.session.is_some() {
+                ready.push(toolbar::Icon::Branch);
+                if self.status().is_some_and(|s| !s.is_clean()) {
+                    ready.push(toolbar::Icon::Stash);
+                }
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| !s.stashes.is_empty())
+                {
+                    ready.push(toolbar::Icon::Pop);
+                }
+            }
+            match toolbar::actions(ui, t, behind, ahead, &ready) {
+                Some(toolbar::Icon::Branch) => self.new_branch_here(),
+                Some(toolbar::Icon::Stash) => {
+                    self.branch_dialog = Some(branches::Dialog::Stash {
+                        message: String::new(),
+                        untracked: false,
+                        keep_index: false,
+                        focus: true,
+                    });
+                }
+                Some(toolbar::Icon::Pop) => {
+                    if let Some(top) = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.stashes.first())
+                        .cloned()
+                    {
+                        self.write(Command::StashApply {
+                            selector: top.selector,
+                            id: top.id,
+                            pop: true,
+                        });
+                    }
+                }
+                _ => {}
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if toolbar::button(
@@ -1133,6 +1226,14 @@ impl RepoWindow {
                 }
             });
         });
+    }
+
+    /// A commit from the loaded history, or the extra one shown (a stash).
+    fn find_commit(&self, id: &Oid) -> Option<gitcraft_git::Commit> {
+        self.history
+            .commit(id)
+            .cloned()
+            .or_else(|| self.extra_commit.clone().filter(|c| &c.id == id))
     }
 
     /// "Short id subject" of a loaded commit (the id alone otherwise).
@@ -1196,6 +1297,14 @@ impl RepoWindow {
             branches::Decision::Run(command) => {
                 self.branch_dialog = None;
                 self.write(command);
+            }
+            branches::Decision::RunAll(commands) => {
+                self.branch_dialog = None;
+                for command in commands {
+                    if !self.write(command) {
+                        break;
+                    }
+                }
             }
             branches::Decision::Switch(target) => {
                 self.branch_dialog = None;
@@ -1607,7 +1716,7 @@ impl RepoWindow {
                 }
             }
             Selection::Commit(id) => {
-                let Some(c) = self.history.commit(&id).cloned() else {
+                let Some(c) = self.find_commit(&id) else {
                     return;
                 };
                 ui.label(
@@ -2323,6 +2432,10 @@ fn error_text(e: &GitError) -> String {
         GitError::WouldOverwrite(files) => trf(
             "Der Wechsel würde lokale Änderungen überschreiben: {dateien}",
             &[("dateien", &escape(&files.join(", ")))],
+        ),
+        GitError::Conflicts(files) => trf(
+            "Beim Anwenden sind Konflikte entstanden ({dateien}). Der Stash bleibt erhalten; löse die Konflikte in der Änderungsliste.",
+            &[("dateien", &escape(files))],
         ),
         GitError::Stale => tr("Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.").to_owned(),
         GitError::InvalidValue(v) => trf(

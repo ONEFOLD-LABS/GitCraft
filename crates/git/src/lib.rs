@@ -19,6 +19,7 @@ mod path;
 mod refs;
 mod repo;
 mod runner;
+mod stash;
 mod status;
 mod trust;
 

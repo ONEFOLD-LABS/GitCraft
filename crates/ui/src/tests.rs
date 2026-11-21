@@ -347,6 +347,8 @@ fn texts_behind_variables_are_translated() {
         "Commit auschecken?",
         "Commits würden unerreichbar",
         "Wechsel nicht möglich",
+        "Änderungen parken (Stash)",
+        "Stash löschen?",
         "Der Name fehlt.",
         "Ein Name darf nicht mit „-“ beginnen.",
         "Ein Name darf keine Leerzeichen enthalten.",
@@ -1315,8 +1317,84 @@ fn a_switch_over_local_changes_lists_them() {
     assert_eq!(
         h.state().branch_dialog,
         Some(branches::Dialog::Overwrite {
-            files: vec!["a.txt".into()]
+            files: vec!["a.txt".into()],
+            target: Some(branches::Target::Branch("alt".into())),
         })
     );
     assert_eq!(head_branch(h.state()), "main");
+}
+
+fn stash_count(w: &RepoWindow) -> usize {
+    w.snapshot.as_ref().map_or(0, |s| s.stashes.len())
+}
+
+/// Stash from the toolbar, look at it, pop it back; drop one and restore it.
+#[test]
+fn stash_park_show_pop_drop_restore() {
+    let f = two_commit_fixture();
+    f.write("a.txt", "geparkt\n");
+    let mut h = harness(f.window());
+    h.get_by_label("Stash").click();
+    settle(&mut h);
+    type_into(&mut h, "Nachricht (optional)", "Zwischenstand");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("stash-dark.png")).unwrap();
+    }
+    h.get_by_label("Stashen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(stash_count(h.state()), 1);
+    assert_eq!(file_text(&f, "a.txt").as_deref(), Some("2\n"));
+
+    // Shown like a commit.
+    let stash = h.state().snapshot.as_ref().unwrap().stashes[0].clone();
+    h.state_mut()
+        .session
+        .as_ref()
+        .unwrap()
+        .submit(gitcraft_core::Command::LoadCommit(stash.id.clone()));
+    settle(&mut h);
+    assert_eq!(h.state().selection, Selection::Commit(stash.id.clone()));
+    // Its files load once it is selected.
+    settle(&mut h);
+    h.get_by_label("1 Datei geändert");
+
+    h.get_by_label("Pop").click();
+    settle(&mut h);
+    assert_eq!(stash_count(h.state()), 0);
+    assert_eq!(file_text(&f, "a.txt").as_deref(), Some("geparkt\n"));
+
+    // Drop asks, then restore by id.
+    assert!(f.git(&["stash", "push", "-q", "-m", "wegwerfen"]));
+    h.state_mut().refresh();
+    settle(&mut h);
+    let stash = h.state().snapshot.as_ref().unwrap().stashes[0].clone();
+    h.state_mut().branch_dialog = Some(branches::Dialog::DropStash {
+        selector: stash.selector.clone(),
+        id: stash.id.clone(),
+        message: stash.message.clone(),
+    });
+    h.run_steps(2);
+    h.get_by_label("Löschen").click();
+    settle(&mut h);
+    assert_eq!(stash_count(h.state()), 0);
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert_eq!(stash_count(h.state()), 1);
+}
+
+/// "Stashen und wechseln" parks the clashing changes and switches.
+#[test]
+fn stash_and_switch_from_the_overwrite_dialog() {
+    let f = two_commit_fixture();
+    assert!(f.git(&["branch", "alt", "HEAD~1"]));
+    f.write("a.txt", "lokal\n");
+    let mut h = harness(f.window());
+    h.state_mut().switch(branches::Target::Branch("alt".into()));
+    settle(&mut h);
+    h.get_by_label("Stashen und wechseln").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(head_branch(h.state()), "alt");
+    assert_eq!(stash_count(h.state()), 1);
 }

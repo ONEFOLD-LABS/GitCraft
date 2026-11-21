@@ -1622,3 +1622,98 @@ fn detached_head_and_what_leaving_it_loses() {
         .unwrap();
     assert_eq!(repo.detached_loss().unwrap().total, 0);
 }
+
+#[test]
+fn stash_push_show_apply_pop_drop_and_restore() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    assert!(
+        !repo.stash_push("leer", false, false, &c).unwrap(),
+        "nothing to stash"
+    );
+    f.write("a.txt", "geparkt\n");
+    f.write("neu.txt", "u");
+    assert!(
+        repo.stash_push("--force Versuch", false, false, &c)
+            .unwrap()
+    );
+    assert_eq!(fs::read_to_string(f.repo().join("a.txt")).unwrap(), "2\n");
+    assert!(
+        f.repo().join("neu.txt").exists(),
+        "untracked stays without the option"
+    );
+    let list = repo.stashes().unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(
+        list[0].message.ends_with("--force Versuch"),
+        "{}",
+        list[0].message
+    );
+    // Shown like a commit against its base.
+    let stash = repo.commit_by_id(&list[0].id).unwrap();
+    let files: Vec<String> = repo
+        .commit_files(&stash)
+        .unwrap()
+        .into_iter()
+        .map(|x| x.path.display())
+        .collect();
+    assert_eq!(files, ["a.txt"]);
+
+    repo.stash_apply("stash@{0}", &list[0].id, false, &c)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(f.repo().join("a.txt")).unwrap(),
+        "geparkt\n"
+    );
+    assert_eq!(repo.stashes().unwrap().len(), 1, "apply keeps it");
+    repo.discard(&paths(&["a.txt"]), &c).unwrap();
+    repo.stash_apply("stash@{0}", &list[0].id, true, &c)
+        .unwrap();
+    assert!(repo.stashes().unwrap().is_empty(), "pop drops it");
+
+    // Untracked files and keep-index.
+    f.write("b.txt", "vorgemerkt");
+    repo.stage(&paths(&["b.txt"]), &c).unwrap();
+    assert!(repo.stash_push("alles", true, true, &c).unwrap());
+    assert!(!f.repo().join("neu.txt").exists(), "untracked included");
+    assert!(
+        f.repo().join("b.txt").exists(),
+        "staged kept with --keep-index"
+    );
+
+    // A selector that moved (a newer stash took stash@{0}) is refused.
+    let list = repo.stashes().unwrap();
+    f.write("a.txt", "noch einer\n");
+    repo.stash_push("neuer", false, false, &c).unwrap();
+    assert_eq!(
+        repo.stash_drop("stash@{0}", &list[0].id, &c),
+        Err(GitError::Stale)
+    );
+    repo.stash_drop("stash@{0}", &repo.stashes().unwrap()[0].id, &c)
+        .unwrap();
+    // Drop and put back by id.
+    repo.stash_drop("stash@{0}", &list[0].id, &c).unwrap();
+    assert!(repo.stashes().unwrap().is_empty());
+    repo.stash_store(&list[0].id, "alles", &c).unwrap();
+    assert_eq!(repo.stashes().unwrap()[0].id, list[0].id);
+    assert!(matches!(
+        repo.stash_drop("stash@{0}; rm", &list[0].id, &c),
+        Err(GitError::InvalidValue(_))
+    ));
+}
+
+#[test]
+fn a_conflicting_stash_apply_is_reported_and_kept() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    f.write("a.txt", "im Stash\n");
+    repo.stash_push("", false, false, &c).unwrap();
+    f.write("a.txt", "neu committet\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Drei", false, false, &c).unwrap();
+    let id = repo.stashes().unwrap()[0].id.clone();
+    let r = repo.stash_apply("stash@{0}", &id, true, &c);
+    assert!(matches!(r, Err(GitError::Conflicts(_))), "{r:?}");
+    assert_eq!(repo.stashes().unwrap().len(), 1, "kept after a conflict");
+    assert_eq!(repo.status().unwrap().conflicts().count(), 1);
+}
