@@ -31,6 +31,7 @@ Die Einstellungen konnten nicht gespeichert werden: {fehler}	The settings could 
 Die Einstellungen waren nicht lesbar und wurden zurückgesetzt ({fehler}); die alte Datei liegt als settings.json.bak daneben.	The settings could not be read and were reset ({fehler}); the old file is kept next to them as settings.json.bak.
 Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
 Diese Übersicht	This list
+GitCraft unterstützen …	Support GitCraft…
 Dieser Diff hat {n} Zeilen.	This diff has {n} lines.
 Diff oder Suche schließen	Close the diff or the search
 Einstellungen	Settings
