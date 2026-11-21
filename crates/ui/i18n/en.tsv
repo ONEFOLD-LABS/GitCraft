@@ -337,3 +337,38 @@ Nichts rückgängig zu machen	Nothing to undo
 Nichts zu wiederholen	Nothing to redo
 Keine Änderungen zum Parken	No changes to stash
 Kein Stash vorhanden	No stash
+Danach fügt „Wiederherstellen“ in der Meldung es wieder hinzu.	Afterwards “Restore” in the notice adds it back.
+Die Remote-Branches und die Upstreams lokaler Branches ziehen mit um.	Its remote branches and the upstreams of local branches move along.
+Die URL enthält Zugangsdaten im Klartext.	The URL contains credentials in plain text.
+Die URL von {name} enthält ein Passwort oder Token im Klartext: Es steht in der Konfigurationsdatei und in jeder Kopie davon.	The URL of {name} contains a password or token in plain text: it is in the configuration file and in every copy of it.
+Die Zugangsdaten von {name} liegen jetzt beim Credential-Helper.	The credentials of {name} are now kept by the credential helper.
+Eigene URL zum Hochladen (Push)	Separate URL for pushing
+Entfernen	Remove
+Entfernen …	Remove …
+Entfernt das Remote {name} ({url}) und seine Remote-Branches. Lokale Branches und Commits bleiben; ihr Upstream fällt weg.	Removes the remote {name} ({url}) and its remote branches. Local branches and commits stay; their upstream goes away.
+Git hat keinen Credential-Helper eingerichtet; die Zugangsdaten bleiben in der URL. Richte einen ein (zum Beispiel den Schlüsselbund des Systems mit git config --global credential.helper …) und versuche es noch einmal.	Git has no credential helper set up; the credentials stay in the URL. Set one up (for example the system keychain with git config --global credential.helper …) and try again.
+GitCraft übergibt es dem Credential-Helper von Git (zum Beispiel dem Schlüsselbund des Systems) und entfernt es aus der URL. Ohne eingerichteten Helper ändert sich nichts.	GitCraft hands it to Git's credential helper (for example the system keychain) and removes it from the URL. Without a helper set up nothing changes.
+Hinzufügen	Add
+Neuer Name	New name
+Push-URL	Push URL
+Push: {url}	Push: {url}
+Remote hinzufügen …	Add remote …
+Remote {name}	Remote {name}
+Remote {name} entfernt.	Remote {name} removed.
+URL	URL
+URL bearbeiten …	Edit URL …
+Ungültige URL {url}: {grund}	Invalid URL {url}: {grund}
+Unverschlüsselte Verbindung.	Unencrypted connection.
+Verschieben	Move
+Zugangsdaten in den Credential-Helper verschieben …	Move credentials into the credential helper …
+Remote hinzufügen	Add remote
+Remote bearbeiten	Edit remote
+Remote umbenennen	Rename remote
+Remote entfernen?	Remove remote?
+Zugangsdaten aus der URL nehmen	Take credentials out of the URL
+Unverschlüsselt: Daten (und Zugangsdaten) gehen im Klartext über das Netz.	Unencrypted: data (and credentials) travel over the network in plain text.
+Die URL fehlt.	The URL is missing.
+Eine URL (oder ihr Host) darf nicht mit „-“ beginnen.	A URL (or its host) must not start with “-”.
+Die URL enthält Steuerzeichen.	The URL contains control characters.
+Transport-Helfer („ext::“, „fd::“ …) können beliebige Programme starten; GitCraft nimmt sie nicht an.	Transport helpers (“ext::”, “fd::” …) can start any program; GitCraft does not accept them.
+GitCraft nimmt nur https, ssh, git, file und lokale Pfade an.	GitCraft accepts only https, ssh, git, file and local paths.

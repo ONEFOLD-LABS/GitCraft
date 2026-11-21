@@ -14,6 +14,7 @@ mod diffview;
 mod discard;
 mod history;
 pub mod i18n;
+mod remotes;
 mod search;
 pub mod settings;
 mod sidebar;
@@ -186,6 +187,8 @@ pub struct RepoWindow {
     extra_commit: Option<gitcraft_git::Commit>,
     /// An open branch dialog.
     branch_dialog: Option<branches::Dialog>,
+    /// An open remote dialog.
+    remote_dialog: Option<remotes::Dialog>,
     /// Saved states of discarded and deleted files, newest first.
     discarded: Vec<Discarded>,
     show_discarded: bool,
@@ -233,6 +236,7 @@ impl RepoWindow {
             confirm: None,
             notice: None,
             branch_dialog: None,
+            remote_dialog: None,
             extra_commit: None,
             compare: None,
             undo: undo::History::default(),
@@ -581,6 +585,28 @@ impl RepoWindow {
                     Some(Command::RestoreTag { name, object }),
                 ));
             }
+            (Command::RemoveRemote(name), Ok(Outcome::RemoteRemoved(remote))) => {
+                self.error = None;
+                let restore = remote.url().map(|url| Command::AddRemote {
+                    name: remote.name.clone(),
+                    url: url.to_owned(),
+                    push_url: remote.push_urls.first().cloned(),
+                });
+                self.notice = Some((
+                    trf("Remote {name} entfernt.", &[("name", &escape(&name))]),
+                    restore,
+                ));
+            }
+            (Command::MoveCredentials(name), Ok(_)) => {
+                self.error = None;
+                self.notice = Some((
+                    trf(
+                        "Die Zugangsdaten von {name} liegen jetzt beim Credential-Helper.",
+                        &[("name", &escape(&name))],
+                    ),
+                    None,
+                ));
+            }
             (Command::DeleteBranch(name), Ok(Outcome::Deleted(tip))) => {
                 self.error = None;
                 self.notice = Some((
@@ -710,6 +736,7 @@ impl RepoWindow {
         self.trust_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.branch_dialog(&ctx);
+        self.remote_dialog(&ctx);
         self.undo_dialog(&ctx);
         if self.show_discarded {
             let mut open = true;
@@ -817,15 +844,26 @@ impl RepoWindow {
             .default_size(230.0)
             .min_size(150.0)
             .show(ui, |ui| {
-                let (refs, stashes) = self
+                let (refs, remotes, stashes) = self
                     .snapshot
                     .as_ref()
-                    .map(|s| (s.refs.as_slice(), s.stashes.as_slice()))
+                    .map(|s| {
+                        (
+                            s.refs.as_slice(),
+                            s.remotes.as_slice(),
+                            s.stashes.as_slice(),
+                        )
+                    })
                     .unwrap_or_default();
                 let wip = self.wip().map(|w| w.changed + w.staged + w.conflicts);
                 let history = &self.history;
                 let lane = |id: &Oid| history.color_of(id).map(|c| t.lanes[c % t.lanes.len()]);
-                match self.sidebar.show(ui, t, refs, stashes, wip, &lane) {
+                let lists = sidebar::Lists {
+                    refs,
+                    remotes,
+                    stashes,
+                };
+                match self.sidebar.show(ui, t, lists, wip, &lane) {
                     Some(Pick::Commit(id)) => self.select_commit(id),
                     Some(Pick::WorkInProgress) => {
                         self.diff = None;
@@ -903,6 +941,37 @@ impl RepoWindow {
                             session.submit(Command::BranchLoss(name.clone()));
                         }
                         self.branch_dialog = Some(branches::Dialog::Delete { name, loss: None });
+                    }
+                    Some(Pick::AddRemote) => self.remote_dialog = Some(remotes::Dialog::add()),
+                    Some(Pick::EditRemote(name)) => {
+                        if let Some(r) = remotes.iter().find(|r| r.name == name) {
+                            self.remote_dialog = Some(remotes::Dialog::Edit {
+                                old: Some(name),
+                                name: String::new(),
+                                url: r.url().unwrap_or_default().to_owned(),
+                                separate: !r.push_urls.is_empty(),
+                                push_url: r.push_urls.first().cloned().unwrap_or_default(),
+                                focus: true,
+                            });
+                        }
+                    }
+                    Some(Pick::RenameRemote(old)) => {
+                        self.remote_dialog = Some(remotes::Dialog::Rename {
+                            name: old.clone(),
+                            old,
+                            focus: true,
+                        });
+                    }
+                    Some(Pick::RemoveRemote(name)) => {
+                        if let Some(r) = remotes.iter().find(|r| r.name == name) {
+                            self.remote_dialog = Some(remotes::Dialog::Remove {
+                                name,
+                                url: r.url().unwrap_or_default().to_owned(),
+                            });
+                        }
+                    }
+                    Some(Pick::MoveCredentials(name)) => {
+                        self.remote_dialog = Some(remotes::Dialog::MoveCredentials { name });
                     }
                     None => {}
                 }
@@ -1519,6 +1588,21 @@ impl RepoWindow {
                 self.switch(target);
             }
             branches::Decision::CreateAt(id) => self.new_branch_at(id),
+        }
+    }
+
+    fn remote_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.remote_dialog.as_mut() else {
+            return;
+        };
+        let t = theme::tokens(ctx);
+        match dialog.show(ctx, t) {
+            branches::Decision::Run(command) => {
+                self.remote_dialog = None;
+                self.write(command);
+            }
+            branches::Decision::Open => {}
+            _ => self.remote_dialog = None,
         }
     }
 
@@ -2658,6 +2742,11 @@ fn error_text(e: &GitError) -> String {
             };
             trf("Ungültiger Name {name}: {grund}", &[("name", &escape(name)), ("grund", &why)])
         }
+        GitError::InvalidUrl { url, problem } => trf(
+            "Ungültige URL {url}: {grund}",
+            &[("url", &escape(url)), ("grund", &tr(remotes::problem_text(problem)))],
+        ),
+        GitError::NoCredentialHelper => tr("Git hat keinen Credential-Helper eingerichtet; die Zugangsdaten bleiben in der URL. Richte einen ein (zum Beispiel den Schlüsselbund des Systems mit git config --global credential.helper …) und versuche es noch einmal.").to_owned(),
         GitError::WouldOverwrite(files) => trf(
             "Der Wechsel würde lokale Änderungen überschreiben: {dateien}",
             &[("dateien", &escape(&files.join(", ")))],

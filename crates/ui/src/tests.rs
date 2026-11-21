@@ -376,7 +376,24 @@ fn texts_behind_variables_are_translated() {
         "Diff oder Suche schließen",
         "Zoom",
         "Diese Übersicht",
+        "Remote hinzufügen",
+        "Remote bearbeiten",
+        "Remote umbenennen",
+        "Remote entfernen?",
+        "Zugangsdaten aus der URL nehmen",
+        "Unverschlüsselt: Daten (und Zugangsdaten) gehen im Klartext über das Netz.",
     ]);
+    texts.extend(
+        [
+            gitcraft_git::UrlProblem::Empty,
+            gitcraft_git::UrlProblem::LeadingDash,
+            gitcraft_git::UrlProblem::Control,
+            gitcraft_git::UrlProblem::Helper,
+            gitcraft_git::UrlProblem::Scheme(String::new()),
+        ]
+        .iter()
+        .map(remotes::problem_text),
+    );
     texts.extend(
         [
             C::BothModified,
@@ -1568,4 +1585,94 @@ fn undo_a_new_branch() {
             .iter()
             .any(|r| r.name == "versuch")
     );
+}
+
+fn remotes_of(f: &Fixture) -> String {
+    let out = Command::new("git")
+        .current_dir(f.repo())
+        .args(["remote", "-v"])
+        .env("GIT_CONFIG_GLOBAL", f.tmp.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Remotes are added from the sidebar (hostile URLs refused while typing), removed after a
+/// confirmation and restored from the notice.
+#[test]
+fn remotes_are_added_removed_and_restored() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    let mut h = harness(f.window());
+    h.get_by_label("Remote hinzufügen …").click();
+    settle(&mut h);
+    type_into(&mut h, "Name", "origin");
+    type_into(&mut h, "URL", "ext::sh -c touch% x");
+    h.run_steps(2);
+    h.get_by_label(
+        "Transport-Helfer („ext::“, „fd::“ …) können beliebige Programme starten; GitCraft nimmt sie nicht an.",
+    );
+    assert!({
+        use egui_kittest::kittest::NodeT;
+        h.get_by_label("Hinzufügen").accesskit_node().is_disabled()
+    });
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "URL")
+        .focus();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "URL")
+        .type_text("http://example.org/r.git");
+    h.run_steps(2);
+    h.get_by_label("Unverschlüsselt: Daten (und Zugangsdaten) gehen im Klartext über das Netz.");
+    h.get_by_label("Hinzufügen").hover();
+    h.step();
+    h.get_by_label("Hinzufügen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert!(remotes_of(&f).contains("origin\thttp://example.org/r.git"));
+
+    h.get_by_label("origin").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Entfernen …").click();
+    settle(&mut h);
+    assert!(
+        matches!(
+            h.state().remote_dialog,
+            Some(remotes::Dialog::Remove { .. })
+        ),
+        "{:?}",
+        h.state().remote_dialog
+    );
+    h.get_by_label("Entfernen").click();
+    settle(&mut h);
+    assert_eq!(remotes_of(&f), "");
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert!(remotes_of(&f).contains("origin\thttp://example.org/r.git"));
+}
+
+/// Remote branches grouped under their remotes; a URL with a password and an unencrypted one
+/// in the warning colour.
+#[test]
+fn render_remotes() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    let main = "refs/heads/main";
+    for (remote, url) in [
+        ("origin", "https://example.org/demo.git"),
+        ("team/spiegel", "https://me:geheim@example.org/spiegel.git"),
+        ("alt", "git://example.org/alt.git"),
+    ] {
+        assert!(f.git(&["remote", "add", remote, url]));
+        for branch in ["main", "feature/x"] {
+            let r = format!("refs/remotes/{remote}/{branch}");
+            assert!(f.git(&["update-ref", &r, main]));
+        }
+    }
+    shot("remotes-dark", ThemePreference::Dark, f.window());
+    shot("remotes-light", ThemePreference::Light, f.window());
 }

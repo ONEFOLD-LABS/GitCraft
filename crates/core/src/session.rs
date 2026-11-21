@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, Comparison, Discarded, FileDiff, GitError, GitRunner,
-    HeadPos, Identity, LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream,
-    Stash, Status, TrustReport, Written,
+    HeadPos, Identity, LogReader, Loss, Oid, Ref, Remote, RepoPath, Repository, SearchKind,
+    SearchStream, Stash, Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub status: Status,
     pub refs: Vec<Ref>,
     pub stashes: Vec<Stash>,
+    pub remotes: Vec<Remote>,
 }
 
 impl Snapshot {
@@ -34,6 +35,7 @@ impl Snapshot {
             status: repo.status()?,
             refs: repo.refs()?,
             stashes: repo.stashes()?,
+            remotes: repo.remotes()?,
         })
     }
 }
@@ -183,6 +185,30 @@ pub enum Command {
         full: String,
         expected: Oid,
     },
+    /// Add a remote (`remote add`, `remote set-url --push`).
+    AddRemote {
+        name: String,
+        url: String,
+        push_url: Option<String>,
+    },
+    /// Rename a remote with its remote-tracking branches (`remote rename`).
+    RenameRemote {
+        old: String,
+        new: String,
+    },
+    /// Remove a remote and its remote-tracking branches (`remote remove`); the outcome is
+    /// what it was.
+    RemoveRemote(String),
+    /// Change the fetch URL and the push URL (`remote set-url [--push]`, `config --unset-all
+    /// remote.<name>.pushurl`).
+    SetRemoteUrls {
+        name: String,
+        url: String,
+        push_url: Option<String>,
+    },
+    /// Hand passwords in the remote's URLs to the credential helper and take them out of the
+    /// URLs (`credential approve`, `remote set-url`).
+    MoveCredentials(String),
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -260,6 +286,11 @@ impl Command {
             | Command::RestoreTag { .. }
             | Command::MoveHead { .. }
             | Command::DeleteRefIf { .. }
+            | Command::AddRemote { .. }
+            | Command::RenameRemote { .. }
+            | Command::RemoveRemote(_)
+            | Command::SetRemoteUrls { .. }
+            | Command::MoveCredentials(_)
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -321,6 +352,8 @@ pub enum Outcome {
     /// A tag was created; the object its ref points to.
     Tagged(Oid),
     Commit(Box<Commit>),
+    /// A remote was removed; what it was.
+    RemoteRemoved(Remote),
     Comparison(Box<Comparison>),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
@@ -675,6 +708,31 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         }
         Command::DeleteRefIf { full, expected } => {
             repo.delete_ref_if(full, expected, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::AddRemote {
+            name,
+            url,
+            push_url,
+        } => {
+            repo.add_remote(name, url, push_url.as_deref(), cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::RenameRemote { old, new } => {
+            repo.rename_remote(old, new, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::RemoveRemote(name) => Outcome::RemoteRemoved(repo.remove_remote(name, cancel)?),
+        Command::SetRemoteUrls {
+            name,
+            url,
+            push_url,
+        } => {
+            repo.set_remote_urls(name, url, push_url.as_deref(), cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::MoveCredentials(name) => {
+            repo.move_credentials(name, cancel)?;
             Outcome::Written(Written::default())
         }
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
