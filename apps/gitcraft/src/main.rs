@@ -34,7 +34,32 @@ impl eframe::App for App {
     }
 }
 
+/// Helper mode (ADR-003): git or ssh started GitCraft as `GIT_ASKPASS`/`SSH_ASKPASS` with the
+/// prompt as the only argument. Asks the window that set this up and prints the answer for
+/// git; fails when the user refused. Nothing is logged.
+fn askpass() -> Option<ExitCode> {
+    std::env::var_os(gitcraft_core::askpass::HELPER_TOKEN_ENV)?;
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() > 1 {
+        return None;
+    }
+    let prompt = args
+        .first()
+        .map(|a| a.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(match gitcraft_core::askpass::client(&prompt) {
+        Some(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::FAILURE,
+    })
+}
+
 fn main() -> ExitCode {
+    if let Some(code) = askpass() {
+        return code;
+    }
     let mut path: Option<PathBuf> = None;
     for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
@@ -82,6 +107,9 @@ fn main() -> ExitCode {
             i18n::set_language(i18n::Language::System);
             theme::install(&cc.egui_ctx, egui::ThemePreference::System);
             let mut window = RepoWindow::new(GitRunner::new(), initial);
+            if let Ok(exe) = std::env::current_exe() {
+                window.use_askpass(&cc.egui_ctx, &exe);
+            }
             window.use_settings(gitcraft_ui::settings::config_dir());
             Ok(Box::new(App { window }))
         }),

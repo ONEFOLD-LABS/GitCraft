@@ -112,14 +112,19 @@ reproduced on the command line (spec: "Git first").
 
 ```rust
 pub enum Event {
-    Started { id: OperationId, title: String },
+    /// Fetch, pull, push: phase and counts from git's `--progress`, a few per second.
     Progress { id: OperationId, progress: Progress },
-    Finished { id: OperationId, result: Result<Outcome, GitError> },
-    Snapshot(Arc<Snapshot>),
-    /// git asks for input (password, passphrase, host key) through the askpass bridge.
-    Prompt { id: OperationId, prompt: Prompt },
+    /// A command ended (a refresh's outcome carries the new snapshot).
+    Finished { id: OperationId, command: Command, result: Result<Outcome, GitError> },
 }
 ```
+
+git and ssh ask for input (password, passphrase, host key) through the askpass bridge
+(`gitcraft_core::askpass`, ADR-003): the window owns an `Askpass` server on `127.0.0.1` with a
+random 256-bit token; `GIT_ASKPASS`/`SSH_ASKPASS` (`SSH_ASKPASS_REQUIRE=force`) point at the
+GitCraft executable, which in helper mode (token in its environment, prompt as the only
+argument) sends the prompt with the token and prints the answer for git. Requests without the
+token are dropped before any dialog appears; answers are never logged or stored.
 
 - Writes are queued per repository and run in order; a read refresh follows every write.
 - Cancellation kills the git process (and its process group/job object, so ssh and remote

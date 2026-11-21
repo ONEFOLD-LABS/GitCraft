@@ -1860,3 +1860,83 @@ fn render_force_push() {
     });
     shot("force-push-light", ThemePreference::Light, w);
 }
+
+/// git's question reaches the window through the askpass bridge; the answer goes back, a
+/// refused one as a refusal.
+#[test]
+fn git_prompts_are_answered_in_the_window() {
+    crate::i18n::set_language(crate::i18n::Language::German);
+    let f = Fixture::new();
+    let mut h = harness(f.window());
+    let ctx = h.ctx.clone();
+    h.state_mut().use_askpass(&ctx, Path::new("gitcraft"));
+    let env = h
+        .state()
+        .askpass
+        .as_ref()
+        .unwrap()
+        .env(Path::new("gitcraft"));
+    let get = |k: &str| {
+        env.iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .unwrap()
+    };
+    let (addr, token) = (
+        get(gitcraft_core::askpass::HELPER_ADDR_ENV),
+        get(gitcraft_core::askpass::HELPER_TOKEN_ENV),
+    );
+    let ask = |prompt: &'static str| {
+        let (addr, token) = (addr.clone(), token.clone());
+        std::thread::spawn(move || gitcraft_core::askpass::request(&addr, &token, prompt))
+    };
+    let asking = ask("Password for 'https://erika@example.org': ");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.state().prompt.is_none() {
+        assert!(Instant::now() < deadline, "no prompt");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.run_steps(2);
+    h.get_by_label("Anmeldung");
+    {
+        use egui::accesskit::Role;
+        let label = "Password for 'https://erika@example.org':";
+        h.get_by_role_and_label(Role::PasswordInput, label).focus();
+        h.step();
+        h.get_by_role_and_label(Role::PasswordInput, label)
+            .type_text("geheim");
+        h.step();
+    }
+    h.get_by_label("OK").hover();
+    h.step();
+    h.get_by_label("OK").click();
+    h.run_steps(2);
+    assert_eq!(asking.join().unwrap().unwrap(), Some("geheim".into()));
+
+    let asking = ask("Username for 'https://example.org': ");
+    while h.state().prompt.is_none() {
+        assert!(Instant::now() < deadline, "no prompt");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.run_steps(2);
+    h.get_by_label("Abbrechen").click();
+    h.run_steps(2);
+    assert_eq!(asking.join().unwrap().unwrap(), None);
+}
+
+#[test]
+fn render_host_key_prompt() {
+    let f = Fixture::new();
+    let mut w = f.window();
+    w.prompts.push_back(gitcraft_core::askpass::Prompt {
+        id: 1,
+        text: String::new(),
+        kind: gitcraft_core::askpass::PromptKind::HostKey {
+            host: "example.org (192.0.2.1)".into(),
+            fingerprint: "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU".into(),
+        },
+    });
+    shot("host-key-dark", ThemePreference::Dark, w);
+}

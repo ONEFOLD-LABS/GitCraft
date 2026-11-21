@@ -10,6 +10,7 @@
 //!   waiting in the queue does not start.
 //! - Every git call lands in the session's [`CommandLog`].
 
+pub mod askpass;
 mod session;
 mod task;
 

@@ -446,3 +446,15 @@ Tag {name} pushen	Push tag {name}
 Branch zum ersten Mal hochladen	Push the branch for the first time
 Push abgelehnt	Push rejected
 Force-Push?	Force push?
+Ablehnen	Reject
+Anmeldung	Sign in
+Annehmen	Accept
+Annehmen trägt ihn in known_hosts ein; danach fragt ssh nicht mehr. Stimmt er nicht, lehne ab: Jemand könnte sich als dieser Host ausgeben.	Accepting adds it to known_hosts; ssh will not ask again. If it does not match, reject it: someone could be pretending to be this host.
+Git fragt danach. GitCraft gibt die Eingabe nur an Git weiter und speichert sie nicht; dauerhaft merkt sie sich ein Credential-Helper.	Git asks for this. GitCraft passes the input to Git only and does not store it; a credential helper remembers it permanently.
+Git kann in diesem Fenster nicht nach Passwörtern fragen: {fehler}	Git cannot ask for passwords in this window: {fehler}
+Ja	Yes
+Nein	No
+OK	OK
+Rückfrage von Git	Question from Git
+Unbekannter SSH-Host	Unknown SSH host
+ssh kennt den Schlüssel von {host} noch nicht. Vergleiche den Fingerabdruck mit dem, den der Anbieter veröffentlicht:	ssh does not know the key of {host} yet. Compare the fingerprint with the one the provider publishes:
