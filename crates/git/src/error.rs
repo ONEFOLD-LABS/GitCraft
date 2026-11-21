@@ -45,6 +45,13 @@ pub enum GitError {
         name: String,
         problem: crate::NameProblem,
     },
+    /// A remote URL GitCraft refuses (credentials already hidden).
+    InvalidUrl {
+        url: String,
+        problem: crate::UrlProblem,
+    },
+    /// No credential helper is configured to hand credentials to.
+    NoCredentialHelper,
     /// A switch would overwrite local changes in these files; nothing was changed.
     WouldOverwrite(Vec<String>),
     /// Applying left conflicts in the working tree (git's report).
@@ -106,6 +113,10 @@ impl fmt::Display for GitError {
                 "switching would overwrite local changes in {}",
                 files.join(", ")
             ),
+            GitError::InvalidUrl { url, problem } => {
+                write!(f, "invalid remote URL {url:?} ({problem:?})")
+            }
+            GitError::NoCredentialHelper => write!(f, "no credential helper is configured"),
             GitError::UnsafePath(p) => write!(f, "refused path {p}"),
             GitError::Stale => write!(f, "the file changed since its diff was shown"),
             GitError::InvalidValue(v) => write!(f, "invalid value {v:?}"),

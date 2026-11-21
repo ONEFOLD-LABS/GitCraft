@@ -1922,3 +1922,103 @@ fn refs_are_removed_only_where_they_were_left() {
     assert_ne!(tag, head, "an annotated tag's own object");
     repo.delete_ref_if("refs/tags/t", &tag, &c).unwrap();
 }
+
+#[test]
+fn remotes_are_added_renamed_edited_and_removed() {
+    let f = Fixture::new();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    assert_eq!(repo.remotes().unwrap(), []);
+    repo.add_remote("origin", "https://example.org/r.git", None, &cancel)
+        .unwrap();
+    repo.add_remote(
+        "team.mirror",
+        "/srv/mirror",
+        Some("ssh://git@example.org/m"),
+        &cancel,
+    )
+    .unwrap();
+    let list = repo.remotes().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[1].name, "team.mirror");
+    assert_eq!(list[1].push_url(), Some("ssh://git@example.org/m"));
+
+    repo.rename_remote("origin", "upstream", &cancel).unwrap();
+    repo.set_remote_urls("team.mirror", "/srv/other", None, &cancel)
+        .unwrap();
+    let list = repo.remotes().unwrap();
+    assert_eq!(list[0].name, "upstream");
+    assert_eq!(list[1].urls, ["/srv/other"]);
+    assert!(list[1].push_urls.is_empty(), "separate push URL removed");
+
+    let removed = repo.remove_remote("upstream", &cancel).unwrap();
+    assert_eq!(removed.url(), Some("https://example.org/r.git"));
+    assert_eq!(repo.remotes().unwrap().len(), 1);
+    // Added back as it was.
+    repo.add_remote("upstream", removed.url().unwrap(), None, &cancel)
+        .unwrap();
+    assert_eq!(repo.remotes().unwrap().len(), 2);
+}
+
+#[test]
+fn hostile_remote_names_and_urls_are_refused() {
+    let f = Fixture::new();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    for name in ["-x", "--upload-pack=touch x", "a b", "a..b", ""] {
+        assert!(
+            matches!(
+                repo.add_remote(name, "/srv/r", None, &cancel),
+                Err(GitError::InvalidName { .. })
+            ),
+            "{name:?}"
+        );
+    }
+    for url in [
+        "--upload-pack=touch x",
+        "ext::sh -c touch% pwned",
+        "ssh://-oProxyCommand=touch%20pwned/r",
+    ] {
+        assert!(
+            matches!(
+                repo.add_remote("origin", url, None, &cancel),
+                Err(GitError::InvalidUrl { .. })
+            ),
+            "{url:?}"
+        );
+    }
+    assert_eq!(repo.remotes().unwrap(), []);
+    assert!(!f.repo().join("pwned").exists());
+}
+
+#[test]
+fn credentials_in_urls_move_into_the_helper() {
+    let f = Fixture::new();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    repo.add_remote(
+        "origin",
+        "https://me:s3cret@example.org/r.git",
+        None,
+        &cancel,
+    )
+    .unwrap();
+    assert!(repo.remotes().unwrap()[0].has_credentials());
+    // Without a helper nothing changes.
+    assert_eq!(
+        repo.move_credentials("origin", &cancel),
+        Err(GitError::NoCredentialHelper)
+    );
+    assert!(repo.remotes().unwrap()[0].has_credentials());
+
+    // A helper that records what it is asked to store.
+    let store = f.tmp.path().join("stored");
+    let helper = format!("store --file={}", store.display()).replace('\\', "/");
+    f.git(&["config", "credential.helper", &helper]);
+    repo.move_credentials("origin", &cancel).unwrap();
+    let remote = &repo.remotes().unwrap()[0];
+    assert_eq!(remote.urls, ["https://example.org/r.git"]);
+    assert!(!remote.has_credentials());
+    let stored = fs::read_to_string(&store).unwrap();
+    assert!(stored.contains("me:s3cret@example.org"), "{stored}");
+}
