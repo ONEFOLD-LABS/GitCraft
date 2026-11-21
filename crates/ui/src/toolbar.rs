@@ -16,6 +16,8 @@ pub(crate) enum Icon {
     Branch,
     Stash,
     Pop,
+    Commands,
+    Settings,
 }
 
 /// An action of the toolbar and the version that brings it.
@@ -38,6 +40,7 @@ pub(crate) fn button(
     icon: Icon,
     label: &str,
     enabled: bool,
+    badge: Option<u32>,
 ) -> egui::Response {
     let sense = if enabled {
         Sense::click()
@@ -65,6 +68,25 @@ pub(crate) fn button(
     };
     let center = pos2(rect.center().x, rect.top() + 16.0);
     draw(ui.painter(), icon, center, color);
+    if let Some(n) = badge.filter(|n| *n > 0) {
+        // Commits to pull or push, as a small pill at the icon's top right.
+        let text = if n > 99 {
+            "99+".to_owned()
+        } else {
+            n.to_string()
+        };
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text, egui::FontId::proportional(10.0), t.text_on_accent);
+        let size = vec2((galley.size().x + 8.0).max(16.0), 15.0);
+        let pill = Rect::from_center_size(pos2(center.x + 12.0, center.y - 8.0), size);
+        ui.painter().rect_filled(pill, 7.5, t.accent);
+        ui.painter().galley(
+            pill.center() - galley.size() / 2.0,
+            galley,
+            t.text_on_accent,
+        );
+    }
     ui.painter().text(
         pos2(rect.center().x, rect.bottom() - 9.0),
         egui::Align2::CENTER_CENTER,
@@ -76,11 +98,25 @@ pub(crate) fn button(
     resp
 }
 
-/// The disabled buttons of actions that come in later versions.
-pub(crate) fn coming(ui: &mut egui::Ui, t: &Tokens) {
+/// The disabled buttons of actions that come in later versions; Pull and Push show how many
+/// commits the current branch is behind and ahead of its upstream.
+pub(crate) fn coming(ui: &mut egui::Ui, t: &Tokens, behind: u32, ahead: u32) {
     for (icon, label, version) in ACTIONS {
-        button(ui, t, icon, tr(label), false)
-            .on_hover_text(trf("Kommt mit Version {v}", &[("v", &version)]));
+        let badge = match icon {
+            Icon::Pull => Some(behind),
+            Icon::Push => Some(ahead),
+            _ => None,
+        };
+        let mut hint = trf("Kommt mit Version {v}", &[("v", &version)]);
+        if let Some(n) = badge.filter(|n| *n > 0) {
+            let what = if icon == Icon::Pull {
+                trf("{n} Commits zum Holen", &[("n", &n)])
+            } else {
+                trf("{n} Commits zum Hochladen", &[("n", &n)])
+            };
+            hint = format!("{what}. {hint}");
+        }
+        button(ui, t, icon, tr(label), false, badge).on_hover_text(hint);
     }
 }
 
@@ -124,6 +160,28 @@ fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
             poly(&[(0.0, -8.0), (0.0, 4.0)]);
             poly(&[(-3.5, 0.5), (0.0, 4.0), (3.5, 0.5)]);
         }
+        Icon::Commands => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(16.0, 13.0)),
+                2.0,
+                s,
+                egui::StrokeKind::Middle,
+            );
+            poly(&[(-4.5, -2.0), (-1.5, 0.5), (-4.5, 3.0)]);
+            poly(&[(0.5, 3.0), (4.5, 3.0)]);
+        }
+        Icon::Settings => {
+            p.circle_stroke(c, 3.0, s);
+            for k in 0..8 {
+                let a = k as f32 / 8.0 * std::f32::consts::TAU;
+                let (x, y) = (a.cos(), a.sin());
+                p.line_segment(
+                    [at(x * 5.5, y * 5.5), at(x * 8.0, y * 8.0)],
+                    Stroke::new(2.2, color),
+                );
+            }
+            p.circle_stroke(c, 6.0, s);
+        }
         Icon::Pop => {
             poly(&[(-7.0, 1.0), (-7.0, 8.0), (7.0, 8.0), (7.0, 1.0)]);
             poly(&[(0.0, 4.0), (0.0, -8.0)]);
@@ -133,9 +191,25 @@ fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
 }
 
 /// A caption above a value (repository, branch) on the left of the toolbar.
-pub(crate) fn caption(ui: &mut egui::Ui, t: &Tokens, caption: &str, value: &str, hover: &str) {
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(caption_width(ui, value), BUTTON.y), Sense::hover());
+/// With `clickable`, hovering highlights it and the response reports clicks.
+pub(crate) fn caption(
+    ui: &mut egui::Ui,
+    t: &Tokens,
+    caption: &str,
+    value: &str,
+    hover: &str,
+    clickable: bool,
+) -> egui::Response {
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(caption_width(ui, value), BUTTON.y), sense);
+    if clickable && resp.hovered() {
+        ui.painter()
+            .rect_filled(rect.expand2(vec2(4.0, 0.0)), 6.0, t.button_hi);
+    }
     let p = ui.painter();
     p.text(
         pos2(rect.left(), rect.top() + 12.0),
@@ -152,7 +226,10 @@ pub(crate) fn caption(ui: &mut egui::Ui, t: &Tokens, caption: &str, value: &str,
             egui::FontId::proportional(15.0),
             t.text_strong,
         );
-    resp.on_hover_text(hover);
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, clickable, format!("{caption}: {value}"))
+    });
+    resp.on_hover_text(hover)
 }
 
 fn caption_width(ui: &egui::Ui, value: &str) -> f32 {
