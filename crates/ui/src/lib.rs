@@ -6,6 +6,7 @@
 //! history and search threads; the window never waits for it.
 
 mod avatars;
+mod branches;
 mod cmdlog;
 mod commit;
 mod diffview;
@@ -164,7 +165,9 @@ pub struct RepoWindow {
     /// A destructive command waiting for confirmation.
     confirm: Option<Confirm>,
     /// What the last discard, delete or restore did, with the saved state that undoes it.
-    notice: Option<(String, Option<String>)>,
+    notice: Option<(String, Option<Command>)>,
+    /// An open branch dialog.
+    branch_dialog: Option<branches::Dialog>,
     /// Saved states of discarded and deleted files, newest first.
     discarded: Vec<Discarded>,
     show_discarded: bool,
@@ -211,6 +214,7 @@ impl RepoWindow {
             log_panel: cmdlog::LogPanel::default(),
             confirm: None,
             notice: None,
+            branch_dialog: None,
             discarded: Vec::new(),
             show_discarded: false,
             trust_prompt: None,
@@ -510,6 +514,43 @@ impl RepoWindow {
                 }
             }
             (Command::ListDiscarded, Ok(Outcome::Discarded(list))) => self.discarded = list,
+            (Command::BranchLoss(name), Ok(Outcome::Loss(l))) => {
+                if let Some(branches::Dialog::Delete { name: n, loss }) =
+                    self.branch_dialog.as_mut()
+                    && *n == name
+                {
+                    *loss = Some(l);
+                }
+            }
+            (Command::DetachedLoss, Ok(Outcome::Loss(l))) => {
+                if let Some(branches::Dialog::Leave { target, loss }) = self.branch_dialog.as_mut()
+                {
+                    if l.total == 0 {
+                        let command = target.command();
+                        self.branch_dialog = None;
+                        self.write(command);
+                    } else {
+                        *loss = Some(l);
+                    }
+                }
+            }
+            (Command::DeleteBranch(name), Ok(Outcome::Deleted(tip))) => {
+                self.error = None;
+                self.notice = Some((
+                    trf(
+                        "Branch {name} gelöscht (Spitze {id}).",
+                        &[("name", &escape(&name)), ("id", &tip.short())],
+                    ),
+                    Some(Command::CreateBranch {
+                        name,
+                        start: tip.as_str().to_owned(),
+                        checkout: false,
+                    }),
+                ));
+            }
+            (_, Err(GitError::WouldOverwrite(files))) => {
+                self.branch_dialog = Some(branches::Dialog::Overwrite { files });
+            }
             (command, Ok(Outcome::Saved(id))) => {
                 let text = match &command {
                     Command::Discard(p) if p.len() == 1 => tr("1 Datei verworfen.").to_owned(),
@@ -521,7 +562,7 @@ impl RepoWindow {
                     Command::DeleteUntracked(p) => trf("{n} Dateien gelöscht.", &[("n", &p.len())]),
                     _ => tr("Wiederhergestellt.").to_owned(),
                 };
-                self.notice = Some((text, Some(id)));
+                self.notice = Some((text, Some(Command::RestoreDiscarded(id))));
                 self.error = None;
                 if let Some(session) = &self.session {
                     session.submit(Command::ListDiscarded);
@@ -571,6 +612,7 @@ impl RepoWindow {
         self.keys_window(&ctx);
         self.trust_dialog(&ctx);
         self.confirm_dialog(&ctx);
+        self.branch_dialog(&ctx);
         if self.show_discarded {
             let mut open = true;
             let restore = discard::discarded_window(
@@ -612,10 +654,10 @@ impl RepoWindow {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(text).color(t.text_strong));
                             // Not "Rückgängig": that is the toolbar's undo.
-                            if let Some(id) = saved
+                            if let Some(command) = saved
                                 && ui.button(tr("Wiederherstellen")).clicked()
                             {
-                                undo = Some(id.clone());
+                                undo = Some(command.clone());
                             }
                             if ui.small_button(tr("Schließen")).clicked() {
                                 close_notice = true;
@@ -627,9 +669,31 @@ impl RepoWindow {
         if close_notice {
             self.notice = None;
         }
-        if let Some(id) = undo {
+        if let Some(command) = undo {
             self.notice = None;
-            self.write(Command::RestoreDiscarded(id));
+            self.write(command);
+        }
+        let detached = match self.status().map(|s| &s.head) {
+            Some(Head::Detached { commit }) => Some(commit.clone()),
+            _ => None,
+        };
+        if let Some(commit) = detached {
+            let mut create = false;
+            egui::Panel::top("losgeloest").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(trf(
+                            "Losgelöster HEAD bei {commit}: neue Commits gehören zu keinem Branch.",
+                            &[("commit", &commit.short())],
+                        ))
+                        .color(t.conflict),
+                    );
+                    create = ui.small_button(tr("Branch hier anlegen …")).clicked();
+                });
+            });
+            if create {
+                self.new_branch_at(commit);
+            }
         }
         egui::Panel::bottom("statuszeile")
             .exact_size(22.0)
@@ -669,6 +733,33 @@ impl RepoWindow {
                         self.diff = None;
                         self.selection = Selection::WorkInProgress;
                         self.history.scroll_to(0);
+                    }
+                    Some(Pick::Checkout(name)) => self.switch(branches::Target::Branch(name)),
+                    Some(Pick::NewBranch {
+                        start,
+                        label,
+                        suggested,
+                    }) => {
+                        self.branch_dialog = Some(branches::Dialog::Create {
+                            start,
+                            label,
+                            name: suggested,
+                            checkout: true,
+                            focus: true,
+                        });
+                    }
+                    Some(Pick::Rename(old)) => {
+                        self.branch_dialog = Some(branches::Dialog::Rename {
+                            name: old.clone(),
+                            old,
+                            focus: true,
+                        });
+                    }
+                    Some(Pick::Delete(name)) => {
+                        if let Some(session) = &self.session {
+                            session.submit(Command::BranchLoss(name.clone()));
+                        }
+                        self.branch_dialog = Some(branches::Dialog::Delete { name, loss: None });
                     }
                     None => {}
                 }
@@ -984,7 +1075,14 @@ impl RepoWindow {
                 .and_then(|s| s.upstream.as_ref())
                 .and_then(|u| u.ahead_behind)
                 .map_or((0, 0), |(a, b)| (b, a));
-            toolbar::coming(ui, t, behind, ahead);
+            let ready: &[toolbar::Icon] = if self.session.is_some() {
+                &[toolbar::Icon::Branch]
+            } else {
+                &[]
+            };
+            if toolbar::actions(ui, t, behind, ahead, ready) == Some(toolbar::Icon::Branch) {
+                self.new_branch_here();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if toolbar::button(
                     ui,
@@ -1035,6 +1133,76 @@ impl RepoWindow {
                 }
             });
         });
+    }
+
+    /// "Short id subject" of a loaded commit (the id alone otherwise).
+    fn commit_label(&self, id: &Oid) -> String {
+        match self.history.commit(id) {
+            Some(c) => format!("{} {}", id.short(), c.subject),
+            None => id.short().to_owned(),
+        }
+    }
+
+    /// The new-branch dialog at a commit.
+    fn new_branch_at(&mut self, id: Oid) {
+        self.branch_dialog = Some(branches::Dialog::Create {
+            label: self.commit_label(&id),
+            start: id.as_str().to_owned(),
+            name: String::new(),
+            checkout: true,
+            focus: true,
+        });
+    }
+
+    /// The toolbar's "Branch": at the selected commit, else at HEAD.
+    fn new_branch_here(&mut self) {
+        if let Selection::Commit(id) = &self.selection {
+            let id = id.clone();
+            self.new_branch_at(id);
+            return;
+        }
+        let label = self
+            .status()
+            .map(|s| branch_name(&s.head))
+            .unwrap_or_else(|| "HEAD".to_owned());
+        self.branch_dialog = Some(branches::Dialog::Create {
+            start: "HEAD".to_owned(),
+            label,
+            name: String::new(),
+            checkout: true,
+            focus: true,
+        });
+    }
+
+    /// Switches; from a detached HEAD it first checks whether commits would be left behind.
+    fn switch(&mut self, target: branches::Target) {
+        let detached = matches!(self.status().map(|s| &s.head), Some(Head::Detached { .. }));
+        if detached && let Some(session) = &self.session {
+            session.submit(Command::DetachedLoss);
+            self.branch_dialog = Some(branches::Dialog::Leave { target, loss: None });
+        } else {
+            self.write(target.command());
+        }
+    }
+
+    fn branch_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.branch_dialog.as_mut() else {
+            return;
+        };
+        let t = theme::tokens(ctx);
+        match dialog.show(ctx, t) {
+            branches::Decision::Open => {}
+            branches::Decision::Close => self.branch_dialog = None,
+            branches::Decision::Run(command) => {
+                self.branch_dialog = None;
+                self.write(command);
+            }
+            branches::Decision::Switch(target) => {
+                self.branch_dialog = None;
+                self.switch(target);
+            }
+            branches::Decision::CreateAt(id) => self.new_branch_at(id),
+        }
     }
 
     /// Asks before discarding or deleting; counts the lines that would be lost meanwhile.
@@ -1377,6 +1545,11 @@ impl RepoWindow {
                 Action::Select(s) => self.selection = s,
                 Action::CopyId(id) => ui.ctx().copy_text(id.as_str().to_owned()),
                 Action::CopyMessage(m) => ui.ctx().copy_text(m),
+                Action::NewBranch(id) => self.new_branch_at(id),
+                Action::Detach(id) => {
+                    let label = self.commit_label(&id);
+                    self.branch_dialog = Some(branches::Dialog::Detach { id, label });
+                }
             }
         }
     }
@@ -2137,6 +2310,19 @@ fn error_text(e: &GitError) -> String {
         GitError::UnsafePath(p) => trf(
             "GitCraft ändert diesen Pfad nicht: {pfad}",
             &[("pfad", &escape(p))],
+        ),
+        GitError::InvalidName { name, problem } => {
+            let why = match problem {
+                gitcraft_git::NameProblem::Empty => tr("Der Name fehlt."),
+                gitcraft_git::NameProblem::LeadingDash => tr("Ein Name darf nicht mit „-“ beginnen."),
+                gitcraft_git::NameProblem::Whitespace => tr("Ein Name darf keine Leerzeichen enthalten."),
+                gitcraft_git::NameProblem::Rules => tr("Git erlaubt den Namen nicht (zum Beispiel „..“, „~“, „^“, „:“, „?“, „*“, „[“ oder ein Ende auf „.lock“ oder „/“)."),
+            };
+            trf("Ungültiger Name {name}: {grund}", &[("name", &escape(name)), ("grund", &why)])
+        }
+        GitError::WouldOverwrite(files) => trf(
+            "Der Wechsel würde lokale Änderungen überschreiben: {dateien}",
+            &[("dateien", &escape(&files.join(", ")))],
         ),
         GitError::Stale => tr("Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.").to_owned(),
         GitError::InvalidValue(v) => trf(

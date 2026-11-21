@@ -341,6 +341,20 @@ fn texts_behind_variables_are_translated() {
         "Verwerfen …",
         "Löschen …",
         "Befehlsprotokoll ein/aus",
+        "Neuer Branch",
+        "Branch umbenennen",
+        "Branch löschen?",
+        "Commit auschecken?",
+        "Commits würden unerreichbar",
+        "Wechsel nicht möglich",
+        "Der Name fehlt.",
+        "Ein Name darf nicht mit „-“ beginnen.",
+        "Ein Name darf keine Leerzeichen enthalten.",
+        "Der Name ist unverändert.",
+        "Löscht den Branch {name} mit 1 Commit, der auf keinem anderen Branch liegt:",
+        "Löscht den Branch {name} mit {n} Commits, die auf keinem anderen Branch liegen:",
+        "HEAD ist losgelöst und hält 1 Commit, der auf keinem Branch liegt. Nach dem Wechsel ist er nur noch über seine ID erreichbar:",
+        "HEAD ist losgelöst und hält {n} Commits, die auf keinem Branch liegen. Nach dem Wechsel sind sie nur noch über ihre ID erreichbar:",
         "Verwirft die Änderungen an 1 Datei ({zeilen}).",
         "Verwirft die Änderungen an {n} Dateien ({zeilen}).",
         "Löscht 1 unversionierte Datei.",
@@ -1135,4 +1149,174 @@ fn command_log_shows_and_copies_calls() {
     );
     settle(&mut h);
     assert!(!h.state().log_panel.open);
+}
+
+fn head_branch(w: &RepoWindow) -> String {
+    match &w.status().unwrap().head {
+        gitcraft_git::Head::Branch { name, .. } => name.clone(),
+        gitcraft_git::Head::Detached { .. } => "(losgelöst)".into(),
+    }
+}
+
+/// main with two commits and identity set.
+fn two_commit_fixture() -> Fixture {
+    let f = Fixture::new();
+    assert!(f.git(&["config", "user.name", "Test"]));
+    assert!(f.git(&["config", "user.email", "t@invalid"]));
+    f.write("a.txt", "1\n");
+    f.commit_all("Eins");
+    f.write("a.txt", "2\n");
+    f.commit_all("Zwei");
+    f
+}
+
+#[test]
+fn toolbar_creates_and_checks_out_a_branch() {
+    let f = two_commit_fixture();
+    let mut h = harness(f.window());
+    h.get_by_label("Branch").click();
+    settle(&mut h);
+    type_into(&mut h, "Name", "feature/neu");
+    h.get_by_label("Anlegen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(head_branch(h.state()), "feature/neu");
+}
+
+#[test]
+fn sidebar_switches_renames_and_deletes_with_restore() {
+    let f = two_commit_fixture();
+    assert!(f.git(&["checkout", "-q", "-b", "idee"]));
+    f.write("idee.txt", "x");
+    f.commit_all("Versuch");
+    assert!(f.git(&["checkout", "-q", "main"]));
+    let mut h = harness(f.window());
+    // Double click switches.
+    h.ctx
+        .options_mut(|o| o.input_options.max_double_click_delay = 5.0);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "idee")
+        .click();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "idee")
+        .click();
+    settle(&mut h);
+    assert_eq!(head_branch(h.state()), "idee");
+    // Back to main from the context menu.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "main")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Auschecken").click();
+    settle(&mut h);
+    assert_eq!(head_branch(h.state()), "main");
+    // Rename.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "idee")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Umbenennen …").click();
+    settle(&mut h);
+    h.state_mut().branch_dialog = Some(branches::Dialog::Rename {
+        old: "idee".into(),
+        name: "idee-2".into(),
+        focus: false,
+    });
+    h.run_steps(2);
+    h.get_by_label("Umbenennen").click();
+    settle(&mut h);
+    assert!(
+        h.state()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .refs
+            .iter()
+            .any(|r| r.name == "idee-2")
+    );
+    // Delete: the dialog names the commit only this branch has.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "idee-2")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Löschen …").click();
+    settle(&mut h);
+    h.get_by_label("Löscht den Branch idee-2 mit 1 Commit, der auf keinem anderen Branch liegt:");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("branch-delete-dark.png"))
+            .unwrap();
+    }
+    h.get_by_label("Löschen").click();
+    settle(&mut h);
+    assert!(
+        !h.state()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .refs
+            .iter()
+            .any(|r| r.name == "idee-2")
+    );
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert!(
+        h.state()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .refs
+            .iter()
+            .any(|r| r.name == "idee-2")
+    );
+}
+
+/// Checking out a commit explains detached HEAD; leaving it with a new commit warns.
+#[test]
+fn detached_head_is_explained_and_leaving_it_warns() {
+    let f = two_commit_fixture();
+    let first = {
+        let w = f.window();
+        w.history.commits()[1].id.clone()
+    };
+    let mut h = harness(f.window());
+    h.state_mut().branch_dialog = Some(branches::Dialog::Detach {
+        id: first.clone(),
+        label: "Eins".into(),
+    });
+    h.run_steps(2);
+    h.get_by_label("Auschecken").click();
+    settle(&mut h);
+    assert_eq!(head_branch(h.state()), "(losgelöst)");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("detached-dark.png")).unwrap();
+    }
+    // A commit only the detached HEAD holds.
+    f.write("b.txt", "x");
+    f.commit_all("Experiment");
+    h.state_mut().refresh();
+    settle(&mut h);
+    h.state_mut()
+        .switch(branches::Target::Branch("main".into()));
+    settle(&mut h);
+    assert!(matches!(
+        h.state().branch_dialog,
+        Some(branches::Dialog::Leave { loss: Some(_), .. })
+    ));
+    h.get_by_label("Trotzdem wechseln").click();
+    settle(&mut h);
+    assert_eq!(head_branch(h.state()), "main");
+}
+
+/// A switch that would overwrite local changes stops and lists the files.
+#[test]
+fn a_switch_over_local_changes_lists_them() {
+    let f = two_commit_fixture();
+    assert!(f.git(&["branch", "alt", "HEAD~1"]));
+    f.write("a.txt", "lokal\n");
+    let mut h = harness(f.window());
+    h.state_mut().switch(branches::Target::Branch("alt".into()));
+    settle(&mut h);
+    assert_eq!(
+        h.state().branch_dialog,
+        Some(branches::Dialog::Overwrite {
+            files: vec!["a.txt".into()]
+        })
+    );
+    assert_eq!(head_branch(h.state()), "main");
 }

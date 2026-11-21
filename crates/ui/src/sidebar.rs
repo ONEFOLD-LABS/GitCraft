@@ -12,6 +12,16 @@ use crate::theme::Tokens;
 pub(crate) enum Pick {
     Commit(Oid),
     WorkInProgress,
+    /// Switch to this local branch (double click or context menu).
+    Checkout(String),
+    /// A new branch starting at this ref; `suggested` prefills the name.
+    NewBranch {
+        start: String,
+        label: String,
+        suggested: String,
+    },
+    Rename(String),
+    Delete(String),
 }
 
 /// Sidebar state that outlives a frame.
@@ -80,9 +90,18 @@ impl Sidebar {
                         .show(ui, |ui| {
                             for r in items {
                                 let color = lane(&r.target).unwrap_or(t.text_dim);
-                                if ref_entry(ui, t, r, color).clicked() {
+                                let resp = ref_entry(ui, t, r, color);
+                                if resp.double_clicked() && r.kind == RefKind::Local && !r.is_head {
+                                    picked = Some(Pick::Checkout(r.name.clone()));
+                                } else if resp.clicked() {
                                     picked = Some(Pick::Commit(r.target.clone()));
                                 }
+                                resp.context_menu(|ui| {
+                                    if let Some(p) = ref_menu(ui, r) {
+                                        picked = Some(p);
+                                        ui.close();
+                                    }
+                                });
                             }
                         });
                 }
@@ -105,6 +124,35 @@ impl Sidebar {
             });
         picked
     }
+}
+
+/// The context menu of a branch or tag.
+fn ref_menu(ui: &mut egui::Ui, r: &Ref) -> Option<Pick> {
+    let mut picked = None;
+    if r.kind == RefKind::Local && !r.is_head && ui.button(tr("Auschecken")).clicked() {
+        picked = Some(Pick::Checkout(r.name.clone()));
+    }
+    if ui.button(tr("Branch hier anlegen …")).clicked() {
+        // A remote branch suggests its own name without the remote.
+        let suggested = match r.kind {
+            RefKind::Remote => r.name.split_once('/').map_or("", |(_, n)| n).to_owned(),
+            _ => String::new(),
+        };
+        picked = Some(Pick::NewBranch {
+            start: r.full_name.clone(),
+            label: r.name.clone(),
+            suggested,
+        });
+    }
+    if r.kind == RefKind::Local {
+        if ui.button(tr("Umbenennen …")).clicked() {
+            picked = Some(Pick::Rename(r.name.clone()));
+        }
+        if !r.is_head && ui.button(tr("Löschen …")).clicked() {
+            picked = Some(Pick::Delete(r.name.clone()));
+        }
+    }
+    picked
 }
 
 fn ref_entry(ui: &mut egui::Ui, t: &Tokens, r: &Ref, color: Color32) -> egui::Response {

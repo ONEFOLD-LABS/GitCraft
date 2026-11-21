@@ -98,16 +98,29 @@ pub(crate) fn button(
     resp
 }
 
-/// The disabled buttons of actions that come in later versions; Pull and Push show how many
-/// commits the current branch is behind and ahead of its upstream.
-pub(crate) fn coming(ui: &mut egui::Ui, t: &Tokens, behind: u32, ahead: u32) {
+/// The action buttons. Those in `ready` work; the others are disabled with the version that
+/// brings them in the tooltip. Pull and Push show how many commits the current branch is behind
+/// and ahead of its upstream. Returns the clicked action.
+pub(crate) fn actions(
+    ui: &mut egui::Ui,
+    t: &Tokens,
+    behind: u32,
+    ahead: u32,
+    ready: &[Icon],
+) -> Option<Icon> {
+    let mut clicked = None;
     for (icon, label, version) in ACTIONS {
         let badge = match icon {
             Icon::Pull => Some(behind),
             Icon::Push => Some(ahead),
             _ => None,
         };
-        let mut hint = trf("Kommt mit Version {v}", &[("v", &version)]);
+        let enabled = ready.contains(&icon);
+        let mut hint = if enabled {
+            String::new()
+        } else {
+            trf("Kommt mit Version {v}", &[("v", &version)])
+        };
         if let Some(n) = badge.filter(|n| *n > 0) {
             let what = if icon == Icon::Pull {
                 trf("{n} Commits zum Holen", &[("n", &n)])
@@ -116,8 +129,17 @@ pub(crate) fn coming(ui: &mut egui::Ui, t: &Tokens, behind: u32, ahead: u32) {
             };
             hint = format!("{what}. {hint}");
         }
-        button(ui, t, icon, tr(label), false, badge).on_hover_text(hint);
+        let resp = button(ui, t, icon, tr(label), enabled, badge);
+        let resp = if hint.is_empty() {
+            resp
+        } else {
+            resp.on_hover_text(hint)
+        };
+        if resp.clicked() {
+            clicked = Some(icon);
+        }
     }
+    clicked
 }
 
 fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {

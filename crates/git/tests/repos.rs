@@ -1503,3 +1503,122 @@ fn old_discarded_states_are_pruned() {
     assert_eq!(repo.prune_discarded(-1, &c).unwrap(), 1);
     assert!(repo.discarded().unwrap().is_empty());
 }
+
+fn head_name(repo: &Repository) -> String {
+    match repo.status().unwrap().head {
+        Head::Branch { name, .. } => name,
+        Head::Detached { .. } => "(detached)".into(),
+    }
+}
+
+/// main with two commits.
+fn two_commits() -> (Fixture, Repository) {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("a.txt", "1\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Eins", false, false, &c).unwrap();
+    f.write("a.txt", "2\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Zwei", false, false, &c).unwrap();
+    (f, repo)
+}
+
+#[test]
+fn create_switch_rename_and_delete_branches() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    let first = all_commits(&repo)[1].id.clone();
+    repo.create_branch("feature/x", first.as_str(), false, &c)
+        .unwrap();
+    assert_eq!(head_name(&repo), "main");
+    repo.create_branch("work", "main", true, &c).unwrap();
+    assert_eq!(head_name(&repo), "work");
+    for (bad, problem) in [
+        ("-rf", gitcraft_git::NameProblem::LeadingDash),
+        ("a b", gitcraft_git::NameProblem::Whitespace),
+        ("a..b", gitcraft_git::NameProblem::Rules),
+    ] {
+        assert!(matches!(
+            repo.create_branch(bad, "main", false, &c),
+            Err(GitError::InvalidName { problem: p, .. }) if p == problem
+        ));
+    }
+    // Local changes travel along when they do not clash.
+    f.write("neu.txt", "n");
+    repo.switch_branch("feature/x", &c).unwrap();
+    assert_eq!(head_name(&repo), "feature/x");
+    assert!(f.repo().join("neu.txt").exists());
+    repo.rename_branch("feature/x", "feature/y", &c).unwrap();
+    assert_eq!(head_name(&repo), "feature/y");
+    // The current branch cannot be deleted.
+    assert!(repo.delete_branch("feature/y", &c).is_err());
+    repo.switch_branch("main", &c).unwrap();
+    // feature/y is contained in main: nothing would be lost.
+    assert_eq!(repo.branch_loss("feature/y").unwrap().total, 0);
+    let tip = repo.delete_branch("feature/y", &c).unwrap();
+    assert_eq!(tip, first);
+    // Restoring by its tip.
+    repo.create_branch("feature/y", tip.as_str(), false, &c)
+        .unwrap();
+}
+
+#[test]
+fn switching_does_not_overwrite_local_changes() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    let first = all_commits(&repo)[1].id.clone();
+    repo.create_branch("alt", first.as_str(), false, &c)
+        .unwrap();
+    f.write("a.txt", "lokal\n");
+    assert_eq!(
+        repo.switch_branch("alt", &c),
+        Err(GitError::WouldOverwrite(vec!["a.txt".into()]))
+    );
+    assert_eq!(head_name(&repo), "main");
+    assert_eq!(
+        fs::read_to_string(f.repo().join("a.txt")).unwrap(),
+        "lokal\n"
+    );
+}
+
+#[test]
+fn deleting_an_unmerged_branch_names_its_commits() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    repo.create_branch("idee", "main", true, &c).unwrap();
+    for n in ["Versuch 1", "Versuch 2"] {
+        f.write("idee.txt", n);
+        repo.stage_all(&c).unwrap();
+        repo.commit(n, false, false, &c).unwrap();
+    }
+    repo.switch_branch("main", &c).unwrap();
+    let loss = repo.branch_loss("idee").unwrap();
+    assert_eq!(loss.total, 2);
+    let subjects: Vec<&str> = loss.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["Versuch 2", "Versuch 1"]);
+    let tip = repo.delete_branch("idee", &c).unwrap();
+    assert_eq!(tip, loss.commits[0].id);
+}
+
+#[test]
+fn detached_head_and_what_leaving_it_loses() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    let first = all_commits(&repo)[1].id.clone();
+    assert_eq!(repo.detached_loss().unwrap().total, 0, "on a branch");
+    repo.switch_detached(&first, &c).unwrap();
+    assert!(matches!(repo.status().unwrap().head, Head::Detached { .. }));
+    assert_eq!(repo.detached_loss().unwrap().total, 0, "nothing new yet");
+    f.write("b.txt", "x");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Experiment", false, false, &c).unwrap();
+    let loss = repo.detached_loss().unwrap();
+    assert_eq!(loss.total, 1);
+    assert_eq!(loss.commits[0].subject, "Experiment");
+    // A branch keeps it.
+    let here = loss.commits[0].id.clone();
+    repo.create_branch("rettung", here.as_str(), false, &c)
+        .unwrap();
+    assert_eq!(repo.detached_loss().unwrap().total, 0);
+}

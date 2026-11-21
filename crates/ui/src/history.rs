@@ -270,6 +270,10 @@ pub(crate) enum Action {
     Select(Selection),
     CopyId(Oid),
     CopyMessage(String),
+    /// "Branch hier anlegen …"
+    NewBranch(Oid),
+    /// "Diesen Commit auschecken …" (detached HEAD)
+    Detach(Oid),
 }
 
 impl History {
@@ -373,6 +377,15 @@ impl History {
                             }
                             if ui.button(tr("Nachricht kopieren")).clicked() {
                                 actions.push(Action::CopyMessage(message.clone()));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button(tr("Branch hier anlegen …")).clicked() {
+                                actions.push(Action::NewBranch(id.clone()));
+                                ui.close();
+                            }
+                            if ui.button(tr("Diesen Commit auschecken …")).clicked() {
+                                actions.push(Action::Detach(id.clone()));
                                 ui.close();
                             }
                         });
