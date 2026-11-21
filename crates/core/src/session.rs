@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, FileDiff, GitError, GitRunner, LogReader, Ref,
-    RepoPath, Repository, SearchKind, SearchStream, Stash, Status, Written,
+    RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -139,6 +139,8 @@ struct Shared {
     cancels: Mutex<HashMap<OperationId, Cancel>>,
     events: Sender<Event>,
     wake: Wake,
+    /// Writes may run (docs/security.md T1). Checked when a write is about to start.
+    trusted: AtomicBool,
 }
 
 impl Shared {
@@ -175,6 +177,7 @@ impl Shared {
 /// One open repository: its commands, write queue, events and command log.
 pub struct RepoSession {
     repo: Repository,
+    trust: TrustReport,
     log: Arc<CommandLog>,
     shared: Arc<Shared>,
     events: Receiver<Event>,
@@ -193,11 +196,17 @@ impl RepoSession {
         let runner = runner.with_log(Arc::clone(&log));
         runner.version()?;
         let repo = Repository::open(&runner, path)?;
+        let trust = repo.trust_report()?;
         let snapshot = Arc::new(Snapshot::read(&repo)?);
-        Ok((RepoSession::start(repo, log, wake)?, snapshot))
+        Ok((RepoSession::start(repo, trust, log, wake)?, snapshot))
     }
 
-    fn start(repo: Repository, log: Arc<CommandLog>, wake: Wake) -> Result<RepoSession, GitError> {
+    fn start(
+        repo: Repository,
+        trust: TrustReport,
+        log: Arc<CommandLog>,
+        wake: Wake,
+    ) -> Result<RepoSession, GitError> {
         let (events_tx, events) = channel();
         let shared = Arc::new(Shared {
             next: AtomicU64::new(0),
@@ -206,6 +215,8 @@ impl RepoSession {
             cancels: Mutex::new(HashMap::new()),
             events: events_tx,
             wake,
+            // Nothing that could run: no reason to ask.
+            trusted: AtomicBool::new(trust.is_empty()),
         });
         let (writes, queue) = channel::<(OperationId, Command, Cancel)>();
         let worker_repo = repo.clone();
@@ -215,7 +226,11 @@ impl RepoSession {
             .spawn(move || {
                 // Ends when the session is dropped (the sender goes away).
                 while let Ok((id, command, cancel)) = queue.recv() {
-                    let result = run(&worker_repo, &command, &cancel);
+                    let result = if worker.trusted.load(Ordering::SeqCst) {
+                        run(&worker_repo, &command, &cancel)
+                    } else {
+                        Err(GitError::NotTrusted)
+                    };
                     // A refresh after every write, so the UI shows what git left. Begun before
                     // the write is reported, so the session never looks idle in between.
                     let refresh = Command::Refresh;
@@ -228,6 +243,7 @@ impl RepoSession {
             .map_err(|e| GitError::Spawn(e.to_string()))?;
         Ok(RepoSession {
             repo,
+            trust,
             log,
             shared,
             events,
@@ -238,6 +254,28 @@ impl RepoSession {
     /// Top level of the working tree.
     pub fn workdir(&self) -> &Path {
         self.repo.workdir()
+    }
+
+    /// The repository's git directory.
+    pub fn git_dir(&self) -> &Path {
+        self.repo.git_dir()
+    }
+
+    /// What writes in this repository could run besides git (read when it was opened).
+    pub fn trust_report(&self) -> &TrustReport {
+        &self.trust
+    }
+
+    /// Writes may run. True from the start when the repository names no programs and has no
+    /// hooks.
+    pub fn is_trusted(&self) -> bool {
+        self.shared.trusted.load(Ordering::SeqCst)
+    }
+
+    /// The user trusts the repository (or withdraws trust). Untrusted, every write ends with
+    /// [`GitError::NotTrusted`] without running git.
+    pub fn set_trusted(&self, trusted: bool) {
+        self.shared.trusted.store(trusted, Ordering::SeqCst);
     }
 
     /// Queues `command`; its outcome arrives as an [`Event`]. Writes run one after another in

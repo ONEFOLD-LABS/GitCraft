@@ -1446,6 +1446,7 @@ fn error_text(e: &GitError) -> String {
             &[("schluessel", &escape(key))],
         ),
         GitError::Cancelled => tr("Abgebrochen.").to_owned(),
+        GitError::NotTrusted => tr("Dieses Repository ist nur zum Lesen geöffnet: Seine Konfiguration startet Programme, denen du noch nicht vertraut hast.").to_owned(),
         GitError::Parse(err) => trf(
             "Unerwartete Ausgabe von git: {fehler}",
             &[("fehler", &escape(err))],

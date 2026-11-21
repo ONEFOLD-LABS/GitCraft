@@ -31,6 +31,8 @@ pub enum GitError {
     OutputTooLarge { command: String, limit: usize },
     /// git took longer than GitCraft allows for the call and was stopped.
     TimedOut { command: String, seconds: u64 },
+    /// The repository's program settings are not trusted (yet): GitCraft refuses to write.
+    NotTrusted,
     /// The user cancelled the call; git and what it started were stopped.
     Cancelled,
     /// The repository's configuration names a program in a way GitCraft cannot switch off.
@@ -76,6 +78,10 @@ impl fmt::Display for GitError {
                 )
             }
             GitError::Cancelled => write!(f, "cancelled"),
+            GitError::NotTrusted => write!(
+                f,
+                "the repository runs programs from its own configuration and is not trusted"
+            ),
             GitError::UnsafeConfig(key) => write!(
                 f,
                 "the repository configuration sets {key}, which GitCraft cannot switch off safely"

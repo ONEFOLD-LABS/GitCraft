@@ -952,3 +952,54 @@ fn a_cancelled_write_does_not_start() {
     assert_eq!(repo.stage_all(&c), Err(GitError::Cancelled));
     assert!(staged_names(&repo.status().unwrap()).is_empty());
 }
+
+#[test]
+fn trust_report_lists_program_settings_and_hooks() {
+    let f = Fixture::new();
+    let repo = f.open();
+    let clean = repo.trust_report().unwrap();
+    assert!(
+        clean.is_empty(),
+        "a fresh repository has only sample hooks: {clean:?}"
+    );
+
+    f.git(&["config", "core.sshCommand", "ssh -i key"]);
+    f.git(&["config", "diff.bin.textconv", "hexdump"]);
+    f.git(&["config", "filter.x.clean", "tr a b"]);
+    f.git(&["config", "core.autocrlf", "false"]);
+    let extra = f.tmp.path().join("extra.cfg");
+    fs::write(&extra, "[credential]\n\thelper = store\n").unwrap();
+    f.git(&["config", "include.path", extra.to_str().unwrap()]);
+    // The user's own (global) settings are not the repository's.
+    fs::write(f.global_config(), "[core]\n\tpager = less\n").unwrap();
+    let hooks = f.repo().join(".git/hooks");
+    fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hooks.join("pre-commit"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let r = f.open().trust_report().unwrap();
+    let keys: Vec<&str> = r.settings.iter().map(|s| s.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "core.sshcommand",
+            "credential.helper",
+            "diff.bin.textconv",
+            "filter.x.clean",
+            "include.path"
+        ]
+    );
+    assert_eq!(r.hooks, ["pre-commit"]);
+    assert!(r.hooks_dir.ends_with(".git/hooks"));
+
+    // core.hooksPath moves the hooks directory.
+    fs::create_dir(f.repo().join(".husky")).unwrap();
+    f.git(&["config", "core.hooksPath", ".husky"]);
+    let r = f.open().trust_report().unwrap();
+    assert_eq!(r.hooks_dir, f.open().workdir().join(".husky"));
+    assert!(r.hooks.is_empty());
+    assert!(r.settings.iter().any(|s| s.key == "core.hookspath"));
+}
