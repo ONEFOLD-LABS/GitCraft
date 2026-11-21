@@ -113,6 +113,13 @@ pub fn tr(de: &'static str) -> &'static str {
     }
 }
 
+/// Ob es für `de` eine englische Zeile gibt (Tests für Texte, die nicht als `tr("…")` im Code
+/// stehen, etwa Abschnittstitel in Variablen).
+#[cfg(test)]
+pub(crate) fn has_english(de: &str) -> bool {
+    EN.contains_key(de)
+}
+
 /// Wie [`tr`], füllt danach `{name}`-Platzhalter mit den Werten.
 pub fn trf(de: &'static str, values: &[(&str, &dyn std::fmt::Display)]) -> String {
     let mut text = tr(de).to_owned();

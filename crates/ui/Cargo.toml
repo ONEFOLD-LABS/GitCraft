@@ -8,11 +8,19 @@ license.workspace = true
 
 [dependencies]
 gitcraft-git.workspace = true
+gitcraft-graph.workspace = true
 egui = { version = "0.37", features = ["default_fonts", "monochrome_emoji_fonts"] }
 # Sprache des Systems (Einstellung „Wie das System“).
 sys-locale = "0.3"
 # Ordner-Auswahl des Systems.
 rfd = "0.17"
+# HTTPS for opt-in avatar images only (docs/decisions/ADR-005): ring as TLS provider, the
+# system's certificate store through the platform verifier (no bundled root list).
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
