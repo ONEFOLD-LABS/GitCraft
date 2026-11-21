@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, channel};
 
 use egui::RichText;
-use gitcraft_git::{Commit, GitError, Oid, Repository, SearchKind};
+use gitcraft_core::Reader;
+use gitcraft_git::{Commit, GitError, Oid, SearchKind};
 
 use crate::i18n::{tr, trf};
 use crate::theme::Tokens;
@@ -146,7 +147,7 @@ impl Search {
     }
 
     /// Runs the search in the bar (a running one is stopped).
-    pub(crate) fn run(&mut self, repo: &Repository, ctx: &egui::Context) {
+    pub(crate) fn run(&mut self, repo: &Reader, ctx: &egui::Context) {
         let text: String = self.text.trim().chars().take(MAX_TEXT).collect();
         self.running = None;
         self.matches.clear();

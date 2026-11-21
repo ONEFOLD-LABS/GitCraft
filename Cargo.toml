@@ -9,6 +9,7 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+gitcraft-core = { path = "crates/core" }
 gitcraft-git = { path = "crates/git" }
 gitcraft-graph = { path = "crates/graph" }
 gitcraft-ui = { path = "crates/ui" }
