@@ -29,9 +29,8 @@ Rules:
 - `crates/ui` holds no repository state of its own beyond view state (selection, scroll,
   expanded sections). It renders the latest snapshot from `crates/core`.
 
-`crates/core` does not exist yet: the first milestone lets the UI call `crates/git` through a
-small worker (`crates/ui/src/worker.rs`). It is introduced before the first write operation
-(roadmap 0.3), and the worker moves there.
+The UI reaches git only through `crates/core`: commands and events of a `RepoSession`, plus a
+read-only `Reader` for the history and search streams it pulls page by page.
 
 ## crates/git – the Git layer
 
@@ -43,8 +42,11 @@ exists):
 | Function | Use | Locks | Hooks |
 |---|---|---|---|
 | `read(cwd, args)` | status, diff, log, show, rev-parse, for-each-ref | no optional locks (`GIT_OPTIONAL_LOCKS=0`) | never run |
-| `write(cwd, args, input)` (planned) | add, restore, commit, branch, merge, … | normal | run where Git runs them |
-| `stream(cwd, args, on_record, cancel)` (planned) | log pages, fetch/push/clone progress | as read or write | as write |
+| `write(cwd, config, args, input, cancel)` | add, restore, commit, branch, apply, … | normal | run where Git runs them |
+| `stream(cwd, config, args)` | log pages, search results (fetch/push progress later) | as read | never run |
+
+Each call runs in its own process group; cancelling a write ends git and everything it started
+(on Windows only git itself so far). Every call is recorded in the session's command log.
 
 Every call: argument list, `-c core.fsmonitor=false`, `GIT_TERMINAL_PROMPT=0`, C locale, no
 pager, redirecting variables (`GIT_DIR`, …) removed, stdout and stderr capped, user-provided
@@ -74,26 +76,28 @@ invisible characters. Turning a `RepoPath` into a file-system path for a destruc
 goes through one checked function that rejects absolute paths, `..` components and paths that
 leave the working tree through a symlink.
 
-## crates/core – the application layer (planned, roadmap 0.3)
+## crates/core – the application layer
 
 ### RepoSession
 
 One per open repository (and per worktree window):
 
 ```rust
-pub struct RepoSession { /* repository, snapshot, queue, log */ }
+pub struct RepoSession { /* repository, trust report, queue, log */ }
 
 impl RepoSession {
-    pub fn open(runner: GitRunner, path: &Path) -> Result<RepoSession, GitError>;
-    /// Latest consistent state for drawing; cheap to clone (Arc).
-    pub fn snapshot(&self) -> Arc<Snapshot>;
-    /// Queues a command; its progress and outcome arrive as Events.
+    /// Checks git, opens the working tree, reads the first snapshot (blocking; run in a Task).
+    pub fn open(runner: GitRunner, path: &Path, wake: Wake)
+        -> Result<(RepoSession, Arc<Snapshot>), GitError>;
+    /// Queues a command; its outcome arrives as an Event (a refresh follows every write).
     pub fn submit(&self, command: Command) -> OperationId;
     pub fn cancel(&self, id: OperationId);
-    /// Events since the last call (outcomes, progress, refreshed snapshots).
+    /// Events since the last call; results of superseded reads never arrive.
     pub fn poll(&self) -> Vec<Event>;
     /// Every git call with arguments, duration and exit code (credentials redacted).
-    pub fn command_log(&self) -> Vec<LogEntry>;
+    pub fn command_log(&self) -> Arc<CommandLog>;
+    /// Read-only access for streams (history pages, search).
+    pub fn reader(&self) -> Reader;
 }
 ```
 

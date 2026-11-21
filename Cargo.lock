@@ -1328,9 +1328,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitcraft-core"
+version = "0.1.0"
+dependencies = [
+ "gitcraft-git",
+ "tempfile",
+]
+
+[[package]]
 name = "gitcraft-git"
 version = "0.1.0"
 dependencies = [
+ "rustix 1.1.6",
  "tempfile",
 ]
 
@@ -1344,6 +1353,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui_kittest",
+ "gitcraft-core",
  "gitcraft-git",
  "gitcraft-graph",
  "image",

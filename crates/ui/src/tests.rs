@@ -72,9 +72,9 @@ impl Fixture {
     /// A window showing this repository, read synchronously.
     fn window(&self) -> RepoWindow {
         let runner = self.runner();
-        let repo = Repository::open(&runner, &self.repo()).unwrap();
-        let snapshot = worker::Snapshot::read(&repo).unwrap();
-        let mut log = repo.log().unwrap();
+        let (session, snapshot) =
+            RepoSession::open(runner.clone(), &self.repo(), std::sync::Arc::new(|| {})).unwrap();
+        let mut log = session.reader().log().unwrap();
         let mut commits = Vec::new();
         loop {
             let page = log.next_page(500).unwrap();
@@ -85,7 +85,7 @@ impl Fixture {
         }
         let mut w = RepoWindow::new(runner, None);
         w.history = History::from_commits(commits);
-        w.repo = Some(repo);
+        w.session = Some(session);
         w.apply(snapshot);
         w
     }
@@ -249,7 +249,7 @@ fn open_runs_in_the_background() {
     assert!(!w.is_busy(), "git did not answer in time");
     assert_eq!(w.error(), None);
     assert_eq!(
-        fs::canonicalize(w.repository().unwrap().workdir()).unwrap(),
+        fs::canonicalize(w.workdir().unwrap()).unwrap(),
         fs::canonicalize(f.repo()).unwrap()
     );
     assert_eq!(w.status().unwrap().untracked().count(), 1);
@@ -276,7 +276,7 @@ fn opening_something_else_shows_an_error() {
         w.collect(&ctx);
     }
     assert!(w.error().is_some_and(|e| e.contains("kein Git-Repository")));
-    assert!(w.repository().is_none());
+    assert!(w.workdir().is_none());
 }
 
 /// Texts passed to `tr` through variables (section titles, meanings) are not seen by the
@@ -474,7 +474,7 @@ fn commit_files_and_diff_view() {
     let mut w = f.window();
     let commit = w.history.commits()[0].clone();
     w.select_commit(commit.id.clone());
-    let repo = w.repo.clone().unwrap();
+    let repo = Repository::open(&f.runner(), &f.repo()).unwrap();
     let files = repo.commit_files(&commit).unwrap();
     w.details = Some(Details {
         id: commit.id.clone(),
@@ -494,7 +494,7 @@ fn commit_files_and_diff_view() {
     let mut w = f.window();
     w.select_commit(commit.id.clone());
     w.diff = Some(DiffState {
-        key: worker::DiffKey::Commit {
+        key: DiffKey::Commit {
             commit: Box::new(commit.clone()),
             file: main.clone(),
         },
@@ -505,7 +505,7 @@ fn commit_files_and_diff_view() {
     shot("diff-dark", ThemePreference::Dark, w);
     let mut w = f.window();
     w.diff = Some(DiffState {
-        key: worker::DiffKey::Untracked {
+        key: DiffKey::Untracked {
             path: gitcraft_git::RepoPath::from_bytes(b"x"),
         },
         title: "src/main.rs".into(),
@@ -530,7 +530,7 @@ fn commit_files_and_diff_view() {
 fn work_in_progress_rows_open_their_diffs() {
     let f = Fixture::busy_repository();
     let w = f.window();
-    let keys: Vec<(String, Option<worker::DiffKey>)> = w
+    let keys: Vec<(String, Option<DiffKey>)> = w
         .rows
         .iter()
         .filter_map(|r| match r {
@@ -546,19 +546,19 @@ fn work_in_progress_rows_open_their_diffs() {
     );
     assert!(matches!(
         get("Cargo.toml"),
-        Some(worker::DiffKey::Worktree { staged: true, .. })
+        Some(DiffKey::Worktree { staged: true, .. })
     ));
     assert!(matches!(
         get("src/main.rs"),
-        Some(worker::DiffKey::Worktree { staged: false, .. })
+        Some(DiffKey::Worktree { staged: false, .. })
     ));
     assert!(matches!(
         get("notizen/Grüße aus Köln.txt"),
-        Some(worker::DiffKey::Untracked { .. })
+        Some(DiffKey::Untracked { .. })
     ));
     assert!(matches!(
         get("src/alt.rs -> src/neu.rs"),
-        Some(worker::DiffKey::Worktree {
+        Some(DiffKey::Worktree {
             old: Some(_),
             staged: true,
             ..
@@ -587,7 +587,7 @@ fn history_search_marks_and_jumps() {
     let ctx = egui::Context::default();
     w.search.open();
     w.search.set_for_test(Some("parser"), None);
-    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    w.search.run(&w.session.as_ref().unwrap().reader(), &ctx);
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.search.is_running() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -616,7 +616,7 @@ fn history_search_marks_and_jumps() {
     let prefix = w.history.commits()[3].id.short().to_owned();
     w.search.open();
     w.search.set_for_test(Some(&prefix), Some(search::Kind::Id));
-    w.search.run(&w.repo.clone().unwrap(), &ctx);
+    w.search.run(&w.session.as_ref().unwrap().reader(), &ctx);
     w.collect_search_now();
     assert_eq!(subjects(&w), "Parser anlegen");
     w.search.close();

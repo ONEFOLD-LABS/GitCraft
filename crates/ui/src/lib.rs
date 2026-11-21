@@ -2,8 +2,8 @@
 //!
 //! Layout and operation follow docs/ux/layout.md: toolbar on top, sidebar with refs on the
 //! left, the history graph in the centre, details of the selection on the right, status line at
-//! the bottom. Git runs on worker threads ([`worker`], [`history`]); the window never waits for
-//! it.
+//! the bottom. Git runs in the repository's session ([`gitcraft_core::RepoSession`]) and on the
+//! history and search threads; the window never waits for it.
 
 mod avatars;
 mod diffview;
@@ -14,14 +14,15 @@ pub mod settings;
 mod sidebar;
 pub mod theme;
 mod toolbar;
-mod worker;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
+use gitcraft_core::{Command, DiffKey, Event, Outcome, RepoSession, Snapshot, Task, Wake};
 use gitcraft_git::{
     Change, ChangedFile, Conflict, FileChange, FileStatus, GitError, GitRunner, GitVersion, Head,
-    MIN_VERSION, Oid, Repository, Status, escape,
+    MIN_VERSION, Oid, Status, escape,
 };
 
 use crate::avatars::Avatars;
@@ -31,7 +32,6 @@ use crate::i18n::{tr, trf};
 use crate::search::{BarAction, Search};
 use crate::settings::{Loaded, Settings};
 use crate::sidebar::{Pick, Sidebar};
-use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
 
 /// The ONEFOLD LABS donation page, linked from the help window (F1).
 const SPONSOR_URL: &str = "https://ko-fi.com/onefoldlabs";
@@ -73,10 +73,6 @@ enum Row {
     },
 }
 
-/// Generation tag of detail jobs (commit details, diffs); they are matched by what they
-/// belong to, not by generation.
-const DETAIL_JOB: u64 = u64::MAX - 1;
-
 /// Message and files of the selected commit (loading while `None`).
 struct Details {
     id: Oid,
@@ -93,18 +89,14 @@ struct DiffState {
     error: Option<String>,
 }
 
-/// What is running right now (shown next to the spinner).
-#[derive(Debug, Clone, PartialEq)]
-enum Busy {
-    Opening(PathBuf),
-    Refreshing,
-}
+/// A repository being opened in the background.
+type Opened = Result<(RepoSession, Arc<Snapshot>), GitError>;
 
 /// The repository window.
 pub struct RepoWindow {
     runner: GitRunner,
-    repo: Option<Repository>,
-    snapshot: Option<Snapshot>,
+    session: Option<RepoSession>,
+    snapshot: Option<Arc<Snapshot>>,
     rows: Vec<Row>,
     labels: Labels,
     history: History,
@@ -120,11 +112,10 @@ pub struct RepoWindow {
     show_keys: bool,
     avatars: Avatars,
     error: Option<String>,
-    busy: Option<Busy>,
+    /// The repository being opened; a newer open replaces it (the older result is dropped).
+    opening: Option<(PathBuf, Task<Opened>)>,
     git_version: Option<GitVersion>,
-    worker: Worker,
-    /// Results of older open/refresh jobs are dropped.
-    generation: u64,
+    version: Option<Task<Result<GitVersion, GitError>>>,
     /// Opened at the first frame (command line), when a context exists.
     pending_open: Option<PathBuf>,
     version_requested: bool,
@@ -136,7 +127,7 @@ impl RepoWindow {
     pub fn new(runner: GitRunner, initial: Option<PathBuf>) -> Self {
         RepoWindow {
             runner,
-            repo: None,
+            session: None,
             snapshot: None,
             rows: Vec::new(),
             labels: Labels::default(),
@@ -152,10 +143,9 @@ impl RepoWindow {
             show_keys: false,
             avatars: Avatars::off(),
             error: None,
-            busy: None,
+            opening: None,
             git_version: None,
-            worker: Worker::new(),
-            generation: 0,
+            version: None,
             pending_open: initial,
             version_requested: false,
             was_focused: true,
@@ -199,24 +189,33 @@ impl RepoWindow {
 
     /// Opens the repository that contains `path` (in the background).
     pub fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.start(Job::Open(path.clone()), Busy::Opening(path), ctx);
+        let runner = self.runner.clone();
+        let wake = wake(ctx);
+        let target = path.clone();
+        let task = Task::spawn("gitcraft-open", wake.clone(), move || {
+            RepoSession::open(runner, &target, wake)
+        });
+        match task {
+            Ok(task) => self.opening = Some((path, task)),
+            Err(e) => self.error = Some(error_text(&e)),
+        }
     }
 
     /// Reads the state of the open repository again (in the background).
-    pub fn refresh(&mut self, ctx: &egui::Context) {
-        if let Some(repo) = self.repo.clone() {
-            self.start(Job::Refresh(repo), Busy::Refreshing, ctx);
+    pub fn refresh(&mut self) {
+        if let Some(session) = &self.session {
+            session.submit(Command::Refresh);
         }
     }
 
     /// True while git is working for the window (the history may still load afterwards).
     pub fn is_busy(&self) -> bool {
-        self.busy.is_some()
+        self.opening.is_some() || self.session.as_ref().is_some_and(RepoSession::busy)
     }
 
-    /// The open repository.
-    pub fn repository(&self) -> Option<&Repository> {
-        self.repo.as_ref()
+    /// Top level of the open repository's working tree.
+    pub fn workdir(&self) -> Option<&Path> {
+        self.session.as_ref().map(RepoSession::workdir)
     }
 
     /// The last error message, if any.
@@ -228,27 +227,10 @@ impl RepoWindow {
         self.snapshot.as_ref().map(|s| &s.status)
     }
 
-    fn start(&mut self, job: Job, busy: Busy, ctx: &egui::Context) {
-        self.generation = self.generation.wrapping_add(1);
-        match self
-            .worker
-            .start(self.generation, job, self.runner.clone(), ctx.clone())
-        {
-            Ok(()) => self.busy = Some(busy),
-            Err(e) => {
-                self.busy = None;
-                self.error = Some(trf(
-                    "Git konnte nicht gestartet werden: {fehler}",
-                    &[("fehler", &e)],
-                ));
-            }
-        }
-    }
-
     /// Shows a freshly opened repository; the history starts loading.
-    fn show_opened(&mut self, repo: Repository, snapshot: Snapshot, ctx: &egui::Context) {
-        self.history = History::start(&repo, ctx);
-        self.repo = Some(repo);
+    fn show_opened(&mut self, session: RepoSession, snapshot: Arc<Snapshot>, ctx: &egui::Context) {
+        self.history = History::start(&session.reader(), ctx);
+        self.session = Some(session);
         self.selection = Selection::None;
         self.details = None;
         self.diff = None;
@@ -257,12 +239,12 @@ impl RepoWindow {
     }
 
     /// Takes a new snapshot; restarts the history when branches, tags or HEAD moved.
-    fn refreshed(&mut self, snapshot: Snapshot, ctx: &egui::Context) {
+    fn refreshed(&mut self, snapshot: Arc<Snapshot>, ctx: &egui::Context) {
         let moved = self.snapshot.as_ref().is_none_or(|old| {
             old.refs != snapshot.refs || head_commit(&old.status) != head_commit(&snapshot.status)
         });
-        if moved && let Some(repo) = &self.repo {
-            self.history = History::start(repo, ctx);
+        if moved && let Some(session) = &self.session {
+            self.history = History::start(&session.reader(), ctx);
         }
         self.apply(snapshot);
         // A diff of the working tree may have changed with it.
@@ -270,11 +252,11 @@ impl RepoWindow {
             && !matches!(state.key, DiffKey::Commit { .. })
         {
             let (key, title) = (state.key.clone(), state.title.clone());
-            self.open_diff(key, title, ctx);
+            self.open_diff(key, title);
         }
     }
 
-    fn apply(&mut self, snapshot: Snapshot) {
+    fn apply(&mut self, snapshot: Arc<Snapshot>) {
         self.rows = rows(&snapshot.status);
         self.labels = Labels::new(&snapshot.refs);
         let dirty = !snapshot.status.is_clean();
@@ -289,47 +271,27 @@ impl RepoWindow {
     }
 
     fn collect(&mut self, ctx: &egui::Context) {
-        for (generation, outcome) in self.worker.poll() {
-            let outcome = match outcome {
-                Outcome::Version(v) => {
-                    self.git_version = Some(v);
-                    continue;
-                }
-                Outcome::CommitDetails { id, result } => {
-                    if let Some(d) = self.details.as_mut().filter(|d| d.id == id) {
-                        match result {
-                            Ok((message, files)) => {
-                                d.message = Some(message);
-                                d.files = Some(files);
-                            }
-                            Err(e) => d.error = Some(error_text(&e)),
-                        }
-                    }
-                    continue;
-                }
-                Outcome::Diff { key, result } => {
-                    if let Some(s) = self.diff.as_mut().filter(|s| s.key == key) {
-                        match result {
-                            Ok(diff) => s.prepared = Some(Prepared::new(s.title.clone(), &diff)),
-                            Err(e) => s.error = Some(error_text(&e)),
-                        }
-                    }
-                    continue;
-                }
-                other => other,
-            };
-            if generation != self.generation {
-                continue;
+        if let Some(v) = self.version.as_mut().and_then(Task::poll) {
+            // Failures show up when a repository is opened; the footer just stays empty.
+            self.git_version = v.ok();
+        }
+        if let Some(opened) = self.opening.as_mut().and_then(|(_, t)| t.poll()) {
+            self.opening = None;
+            match opened {
+                Ok((session, snapshot)) => self.show_opened(session, snapshot, ctx),
+                Err(e) => self.error = Some(error_text(&e)),
             }
-            self.busy = None;
-            match outcome {
-                Outcome::Opened(opened) => {
-                    let (repo, snapshot) = *opened;
-                    self.show_opened(repo, snapshot, ctx);
-                }
-                Outcome::Refreshed(snapshot) => self.refreshed(*snapshot, ctx),
-                Outcome::Failed(e) => self.error = Some(error_text(&e)),
-                Outcome::Version(_) | Outcome::CommitDetails { .. } | Outcome::Diff { .. } => {}
+        }
+        let events = self
+            .session
+            .as_ref()
+            .map(RepoSession::poll)
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                Event::Finished {
+                    command, result, ..
+                } => self.finished(command, result, ctx),
             }
         }
         self.history.poll();
@@ -347,6 +309,43 @@ impl RepoWindow {
         }
     }
 
+    /// Takes the result of a command.
+    fn finished(
+        &mut self,
+        command: Command,
+        result: Result<Outcome, GitError>,
+        ctx: &egui::Context,
+    ) {
+        match (command, result) {
+            (Command::Refresh, Ok(Outcome::Refreshed(snapshot))) => self.refreshed(snapshot, ctx),
+            (Command::CommitDetails(commit), result) => {
+                if let Some(d) = self.details.as_mut().filter(|d| d.id == commit.id) {
+                    match result {
+                        Ok(Outcome::CommitDetails { message, files }) => {
+                            d.message = Some(message);
+                            d.files = Some(files);
+                        }
+                        Ok(_) => {}
+                        Err(e) => d.error = Some(error_text(&e)),
+                    }
+                }
+            }
+            (Command::Diff(key), result) => {
+                if let Some(s) = self.diff.as_mut().filter(|s| s.key == key) {
+                    match result {
+                        Ok(Outcome::Diff(diff)) => {
+                            s.prepared = Some(Prepared::new(s.title.clone(), &diff));
+                        }
+                        Ok(_) => {}
+                        Err(e) => s.error = Some(error_text(&e)),
+                    }
+                }
+            }
+            (_, Err(e)) => self.error = Some(error_text(&e)),
+            (_, Ok(_)) => {}
+        }
+    }
+
     fn wip(&self) -> Option<WipCounts> {
         let status = self.status()?;
         (!status.is_clean()).then(|| WipCounts {
@@ -361,10 +360,9 @@ impl RepoWindow {
         let ctx = ui.ctx().clone();
         if !self.version_requested {
             self.version_requested = true;
-            // Failures show up when a repository is opened; the footer just stays empty.
-            let _ = self
-                .worker
-                .start(u64::MAX, Job::Version, self.runner.clone(), ctx.clone());
+            let runner = self.runner.clone();
+            self.version =
+                Task::spawn("gitcraft-version", wake(&ctx), move || runner.version()).ok();
         }
         if let Some(path) = self.pending_open.take() {
             self.open(path, &ctx);
@@ -392,9 +390,9 @@ impl RepoWindow {
         egui::Panel::bottom("statuszeile")
             .exact_size(22.0)
             .show(ui, |ui| self.status_line(ui));
-        if self.repo.is_none() {
+        if self.session.is_none() {
             egui::CentralPanel::default().show(ui, |ui| {
-                if self.busy.is_none() {
+                if self.opening.is_none() {
                     self.welcome(ui);
                 }
             });
@@ -435,63 +433,47 @@ impl RepoWindow {
                 self.history_view(ui);
             }
         });
-        self.ensure_details(&ctx);
+        self.ensure_details();
     }
 
     /// Starts loading message and files of the selected commit when they are not there yet.
-    fn ensure_details(&mut self, ctx: &egui::Context) {
+    fn ensure_details(&mut self) {
         let Selection::Commit(id) = &self.selection else {
             return;
         };
         if self.details.as_ref().is_some_and(|d| &d.id == id) {
             return;
         }
-        let (Some(repo), Some(commit)) = (self.repo.clone(), self.history.commit(id).cloned())
+        let (Some(session), Some(commit)) = (&self.session, self.history.commit(id).cloned())
         else {
             return;
         };
+        session.submit(Command::CommitDetails(Box::new(commit)));
         self.details = Some(Details {
             id: id.clone(),
             message: None,
             files: None,
             error: None,
         });
-        let _ = self.worker.start(
-            DETAIL_JOB,
-            Job::CommitDetails(repo, Box::new(commit)),
-            self.runner.clone(),
-            ctx.clone(),
-        );
     }
 
     /// Shows the diff `key` in the centre (loading in the background).
-    fn open_diff(&mut self, key: DiffKey, title: String, ctx: &egui::Context) {
-        let Some(repo) = self.repo.clone() else {
+    fn open_diff(&mut self, key: DiffKey, title: String) {
+        let Some(session) = &self.session else {
             return;
         };
+        session.submit(Command::Diff(key.clone()));
         let keep = self
             .diff
             .take()
             .filter(|s| s.key == key)
             .and_then(|s| s.prepared);
         self.diff = Some(DiffState {
-            key: key.clone(),
+            key,
             title,
             prepared: keep,
             error: None,
         });
-        if let Err(e) = self.worker.start(
-            DETAIL_JOB,
-            Job::Diff(repo, key),
-            self.runner.clone(),
-            ctx.clone(),
-        ) && let Some(s) = self.diff.as_mut()
-        {
-            s.error = Some(trf(
-                "Git konnte nicht gestartet werden: {fehler}",
-                &[("fehler", &e)],
-            ));
-        }
     }
 
     fn diff_view(&mut self, ui: &mut egui::Ui) {
@@ -552,7 +534,7 @@ impl RepoWindow {
             }
             (find, previous, next)
         });
-        if find && self.repo.is_some() {
+        if find && self.session.is_some() {
             self.diff = None;
             self.search.open();
         }
@@ -599,7 +581,7 @@ impl RepoWindow {
             self.open(path, ctx);
         } else if refresh || (focused && !self.was_focused && !self.is_busy()) {
             // Back in the window: files may have changed outside.
-            self.refresh(ctx);
+            self.refresh();
         }
         self.was_focused = focused;
         if step != 0 {
@@ -629,8 +611,8 @@ impl RepoWindow {
 
     fn pick_folder(&mut self, ctx: &egui::Context) {
         let mut dialog = rfd::FileDialog::new().set_title(tr("Repository öffnen"));
-        if let Some(repo) = &self.repo {
-            dialog = dialog.set_directory(repo.workdir());
+        if let Some(dir) = self.workdir() {
+            dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_folder() {
             self.open(path, ctx);
@@ -641,21 +623,15 @@ impl RepoWindow {
         let ctx = ui.ctx().clone();
         let t = theme::tokens(&ctx);
         ui.horizontal(|ui| {
-            if let (Some(repo), Some(status)) = (&self.repo, self.status()) {
+            if let (Some(workdir), Some(status)) = (self.workdir(), self.status()) {
                 let hint = format!(
                     "{}\n{}",
-                    shown_path(repo.workdir()),
+                    shown_path(workdir),
                     shortcut_hint(&ctx, tr("Anderes Repository öffnen"), &OPEN)
                 );
-                let repo_clicked = toolbar::caption(
-                    ui,
-                    t,
-                    tr("Repository"),
-                    &repo_name(repo.workdir()),
-                    &hint,
-                    true,
-                )
-                .clicked();
+                let repo_clicked =
+                    toolbar::caption(ui, t, tr("Repository"), &repo_name(workdir), &hint, true)
+                        .clicked();
                 toolbar::caption(
                     ui,
                     t,
@@ -691,7 +667,7 @@ impl RepoWindow {
                 toolbar::button(ui, t, toolbar::Icon::Commands, tr("Befehle"), false, None)
                     .on_hover_text(trf("Kommt mit Version {v}", &[("v", &"0.8")]));
                 let search = ui.add_enabled(
-                    self.repo.is_some(),
+                    self.session.is_some(),
                     egui::Button::new(
                         RichText::new(trf(
                             "Commits suchen ({taste})",
@@ -705,7 +681,7 @@ impl RepoWindow {
                     self.diff = None;
                     self.search.open();
                 }
-                if self.repo.is_none() {
+                if self.session.is_none() {
                     let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
                         &ctx,
                         tr("Repository öffnen"),
@@ -715,11 +691,11 @@ impl RepoWindow {
                         self.pick_folder(&ctx);
                     }
                 }
-                if let Some(busy) = &self.busy {
-                    let text = match busy {
-                        Busy::Opening(p) => trf("Öffne {pfad} …", &[("pfad", &shown_path(p))]),
-                        Busy::Refreshing => tr("Lese Status …").to_owned(),
-                    };
+                let busy = match &self.opening {
+                    Some((p, _)) => Some(trf("Öffne {pfad} …", &[("pfad", &shown_path(p))])),
+                    None => self.is_busy().then(|| tr("Git arbeitet …").to_owned()),
+                };
+                if let Some(text) = busy {
                     ui.label(RichText::new(text).color(t.text_dim));
                     ui.add(egui::Spinner::new());
                 }
@@ -762,8 +738,8 @@ impl RepoWindow {
         let t = theme::tokens(ui.ctx());
         let zoom = (ui.ctx().zoom_factor() * 100.0).round();
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            if let Some(repo) = &self.repo {
-                ui.add(egui::Label::new(RichText::new(shown_path(repo.workdir())).color(t.text_dim)).truncate());
+            if let Some(workdir) = self.workdir() {
+                ui.add(egui::Label::new(RichText::new(shown_path(workdir)).color(t.text_dim)).truncate());
                 ui.label(RichText::new("·").color(t.text_dim));
             }
             if let Some(status) = self.status() {
@@ -792,7 +768,7 @@ impl RepoWindow {
                 ui.label(RichText::new("·").color(t.text_dim));
                 ui.label(RichText::new(trf("Zoom {p} %", &[("p", &zoom)])).color(t.text_dim))
                     .on_hover_text(tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0"));
-                if self.repo.is_some() {
+                if self.session.is_some() {
                     let n = self.history.commits().len();
                     let text = if self.history.is_loading() {
                         trf("{n} Commits geladen …", &[("n", &n)])
@@ -860,8 +836,8 @@ impl RepoWindow {
             if let Some(e) = self.search.error() {
                 ui.label(RichText::new(error_text(e)).color(t.error_text));
             }
-            if run && let Some(repo) = self.repo.clone() {
-                self.search.run(&repo, ui.ctx());
+            if run && let Some(reader) = self.session.as_ref().map(RepoSession::reader) {
+                self.search.run(&reader, ui.ctx());
                 self.collect_search_now();
             }
             match action {
@@ -1077,8 +1053,7 @@ impl RepoWindow {
             }
         }
         if let Some((key, title)) = open {
-            let ctx = ui.ctx().clone();
-            self.open_diff(key, title, &ctx);
+            self.open_diff(key, title);
         }
     }
 
@@ -1116,8 +1091,7 @@ impl RepoWindow {
                 }
             });
         if let Some((key, title)) = open {
-            let ctx = ui.ctx().clone();
-            self.open_diff(key, title, &ctx);
+            self.open_diff(key, title);
         }
     }
 
@@ -1215,6 +1189,12 @@ impl RepoWindow {
 }
 
 /// The branch name for the toolbar, or `HEAD 1a2b3c4` when detached.
+/// Asks egui for a repaint from a worker thread.
+fn wake(ctx: &egui::Context) -> Wake {
+    let ctx = ctx.clone();
+    Arc::new(move || ctx.request_repaint())
+}
+
 fn branch_name(head: &Head) -> String {
     match head {
         Head::Branch { name, .. } => escape(name),
@@ -1465,6 +1445,7 @@ fn error_text(e: &GitError) -> String {
             "Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.",
             &[("schluessel", &escape(key))],
         ),
+        GitError::Cancelled => tr("Abgebrochen.").to_owned(),
         GitError::Parse(err) => trf(
             "Unerwartete Ausgabe von git: {fehler}",
             &[("fehler", &escape(err))],
