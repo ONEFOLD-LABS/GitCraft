@@ -1,11 +1,18 @@
 //! The sidebar (docs/ux/layout.md): local branches, remote branches, tags and stashes with a
 //! filter field. Selecting a branch or tag selects its commit in the history.
 
-use egui::RichText;
+use egui::{Color32, RichText};
 use gitcraft_git::{Oid, Ref, RefKind, Stash, Tracking, escape};
 
 use crate::i18n::{tr, trf};
 use crate::theme::Tokens;
+
+/// What the user picked in the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Pick {
+    Commit(Oid),
+    WorkInProgress,
+}
 
 /// Sidebar state that outlives a frame.
 #[derive(Default)]
@@ -14,14 +21,18 @@ pub(crate) struct Sidebar {
 }
 
 impl Sidebar {
-    /// Draws the sidebar; returns the commit to select when the user picks a ref.
+    /// Draws the sidebar; returns what the user picked. `wip` is the number of changed files
+    /// (an entry on top while there are any); `lane` gives a commit's lane colour, for the dot
+    /// beside each branch.
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         t: &Tokens,
         refs: &[Ref],
         stashes: &[Stash],
-    ) -> Option<Oid> {
+        wip: Option<usize>,
+        lane: &dyn Fn(&Oid) -> Option<Color32>,
+    ) -> Option<Pick> {
         let mut picked = None;
         ui.add(
             egui::TextEdit::singleline(&mut self.filter)
@@ -30,6 +41,23 @@ impl Sidebar {
         )
         .on_hover_text(tr("Branches, Tags und Stashes filtern"));
         ui.add_space(4.0);
+        if let Some(n) = wip {
+            let resp = ui
+                .horizontal(|ui| {
+                    dot(ui, t.modified);
+                    let r = ui.add(
+                        egui::Button::selectable(false, RichText::new(tr("Offene Änderungen")))
+                            .truncate(),
+                    );
+                    ui.label(RichText::new(n.to_string()).color(t.text_dim).size(12.0));
+                    r
+                })
+                .inner;
+            if resp.clicked() {
+                picked = Some(Pick::WorkInProgress);
+            }
+            ui.add_space(2.0);
+        }
         let needle = self.filter.to_lowercase();
         let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
         egui::ScrollArea::vertical()
@@ -51,8 +79,9 @@ impl Sidebar {
                         .default_open(open)
                         .show(ui, |ui| {
                             for r in items {
-                                if ref_entry(ui, t, r).clicked() {
-                                    picked = Some(r.target.clone());
+                                let color = lane(&r.target).unwrap_or(t.text_dim);
+                                if ref_entry(ui, t, r, color).clicked() {
+                                    picked = Some(Pick::Commit(r.target.clone()));
                                 }
                             }
                         });
@@ -78,7 +107,7 @@ impl Sidebar {
     }
 }
 
-fn ref_entry(ui: &mut egui::Ui, t: &Tokens, r: &Ref) -> egui::Response {
+fn ref_entry(ui: &mut egui::Ui, t: &Tokens, r: &Ref, color: Color32) -> egui::Response {
     let name = escape(&r.name);
     let mut text = RichText::new(&name);
     if r.is_head {
@@ -94,6 +123,7 @@ fn ref_entry(ui: &mut egui::Ui, t: &Tokens, r: &Ref) -> egui::Response {
         Some(Tracking::Gone) => tr("Upstream weg").to_owned(),
     };
     ui.horizontal(|ui| {
+        dot(ui, color);
         let resp = ui.add(egui::Button::selectable(false, text).truncate());
         if !track.is_empty() {
             ui.label(RichText::new(&track).color(t.text_dim).size(12.0));
@@ -117,4 +147,10 @@ fn ref_entry(ui: &mut egui::Ui, t: &Tokens, r: &Ref) -> egui::Response {
         resp.on_hover_text(hover)
     })
     .inner
+}
+
+/// A small disc in a lane or state colour before an entry.
+fn dot(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, color);
 }
