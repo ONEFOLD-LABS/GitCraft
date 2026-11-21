@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// Entries kept; older ones are dropped.
@@ -71,6 +72,31 @@ impl LogEntry {
             .join(" ")
     }
 
+    /// The call with a change into its working directory first, for this platform's shell.
+    pub fn shell_line_in_dir(&self) -> String {
+        if cfg!(windows) {
+            self.powershell_line_in_dir()
+        } else {
+            self.posix_line_in_dir()
+        }
+    }
+
+    pub fn posix_line_in_dir(&self) -> String {
+        format!(
+            "cd {} && {}",
+            posix_quote(&self.cwd.to_string_lossy()),
+            self.posix_line()
+        )
+    }
+
+    pub fn powershell_line_in_dir(&self) -> String {
+        format!(
+            "Set-Location -LiteralPath {}; {}",
+            powershell_quote(&self.cwd.to_string_lossy()),
+            self.powershell_line()
+        )
+    }
+
     /// The call as a PowerShell line.
     pub fn powershell_line(&self) -> String {
         std::iter::once("git".to_owned())
@@ -84,6 +110,8 @@ impl LogEntry {
 #[derive(Debug, Default)]
 pub struct CommandLog {
     entries: Mutex<VecDeque<LogEntry>>,
+    /// Calls recorded so far (also those already dropped): changes with every call.
+    recorded: AtomicU64,
 }
 
 impl CommandLog {
@@ -98,6 +126,13 @@ impl CommandLog {
             }
             e.push_back(entry);
         }
+        self.recorded.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Number of calls recorded since the log was created; a viewer re-reads the entries when
+    /// it changes.
+    pub fn recorded(&self) -> u64 {
+        self.recorded.load(Ordering::SeqCst)
     }
 
     /// A copy of the entries, oldest first.
@@ -248,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn lines_with_the_working_directory() {
+        let mut e = entry(&["status"]);
+        e.cwd = PathBuf::from("/home/a b/it's");
+        assert_eq!(
+            e.posix_line_in_dir(),
+            r"cd '/home/a b/it'\''s' && git status"
+        );
+        assert_eq!(
+            e.powershell_line_in_dir(),
+            "Set-Location -LiteralPath '/home/a b/it''s'; git status"
+        );
+    }
+
+    #[test]
     fn powershell_lines_double_single_quotes() {
         assert_eq!(
             entry(&["commit", "-m", "it's $x"]).powershell_line(),
@@ -267,6 +316,7 @@ mod tests {
         }
         let e = log.entries();
         assert_eq!(e.len(), KEEP);
+        assert_eq!(log.recorded(), (KEEP + 5) as u64);
         assert_eq!(e[0].args[0], "5");
     }
 }

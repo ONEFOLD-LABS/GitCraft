@@ -223,3 +223,14 @@ Löscht {n} unversionierte Dateien.	Deletes {n} untracked files.
 Verwerfen …	Discard …
 Löschen …	Delete …
 Rückgängig	Undo
+Befehlsprotokoll	Command log
+{n} Aufrufe	{n} calls
+Nur ändernde Befehle	Only commands that change something
+Klick kopiert den Befehl; Zugangsdaten sind geschwärzt.	A click copies the command; credentials are redacted.
+ändert	changes
+Verzeichnis: {pfad}	Directory: {pfad}
+Exit-Code {code}	Exit code {code}
+Von GitCraft beendet (abgebrochen, Zeitlimit oder nicht mehr gebraucht)	Stopped by GitCraft (cancelled, time limit or no longer needed)
+Befehl kopieren	Copy command
+Mit Verzeichniswechsel kopieren	Copy with change of directory
+Befehlsprotokoll ein/aus	Show or hide the command log

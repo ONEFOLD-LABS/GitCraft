@@ -6,6 +6,7 @@
 //! history and search threads; the window never waits for it.
 
 mod avatars;
+mod cmdlog;
 mod commit;
 mod diffview;
 mod discard;
@@ -46,6 +47,8 @@ const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C)
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+const LOG: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L);
 const KEYS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
 /// Colour role of a file row; the colour itself comes from the theme.
@@ -156,6 +159,8 @@ pub struct RepoWindow {
     commit: CommitForm,
     /// Commit messages not committed yet, per repository (working tree).
     drafts: std::collections::HashMap<PathBuf, (String, String)>,
+    /// The command log panel.
+    log_panel: cmdlog::LogPanel,
     /// A destructive command waiting for confirmation.
     confirm: Option<Confirm>,
     /// What the last discard, delete or restore did, with the saved state that undoes it.
@@ -203,6 +208,7 @@ impl RepoWindow {
             commit: CommitForm::default(),
             drafts: std::collections::HashMap::new(),
             read_error: false,
+            log_panel: cmdlog::LogPanel::default(),
             confirm: None,
             notice: None,
             discarded: Vec::new(),
@@ -628,6 +634,14 @@ impl RepoWindow {
         egui::Panel::bottom("statuszeile")
             .exact_size(22.0)
             .show(ui, |ui| self.status_line(ui));
+        if self.log_panel.open {
+            let log = self.session.as_ref().map(RepoSession::command_log);
+            egui::Panel::bottom("befehlsprotokoll")
+                .resizable(true)
+                .default_size(180.0)
+                .min_size(80.0)
+                .show(ui, |ui| self.log_panel.show(ui, t, log.as_deref()));
+        }
         if self.session.is_none() {
             egui::CentralPanel::default().show(ui, |ui| {
                 if self.opening.is_none() {
@@ -846,6 +860,9 @@ impl RepoWindow {
             let find = i.consume_shortcut(&FIND);
             let previous = i.consume_shortcut(&PREVIOUS);
             let next = i.consume_shortcut(&NEXT);
+            if i.consume_shortcut(&LOG) {
+                self.log_panel.toggle();
+            }
             if i.consume_shortcut(&KEYS) {
                 self.show_keys = !self.show_keys;
             }
@@ -1204,6 +1221,15 @@ impl RepoWindow {
                 ui.label(RichText::new(text).color(t.text_dim));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let log = shortcut_hint(ui.ctx(), tr("Befehlsprotokoll"), &LOG);
+                if ui
+                    .link(tr("Befehlsprotokoll"))
+                    .on_hover_text(log)
+                    .clicked()
+                {
+                    self.log_panel.toggle();
+                }
+                ui.label(RichText::new("·").color(t.text_dim));
                 if !self.discarded.is_empty() {
                     if ui
                         .link(trf(
@@ -1267,6 +1293,7 @@ impl RepoWindow {
                         "Commit wählen",
                     ),
                     (f(&COPY), "Commit-ID kopieren"),
+                    (f(&LOG), "Befehlsprotokoll ein/aus"),
                     (
                         tr("Pfeil hoch/runter, Shift+Pfeil, Enter").to_owned(),
                         "Zeilen im Diff wählen und vormerken",
