@@ -182,6 +182,11 @@ impl History {
         self.position(id).and_then(|i| self.commits.get(i))
     }
 
+    /// Asks for the next page (e.g. while looking for further search matches).
+    pub(crate) fn load_more(&mut self) {
+        self.request();
+    }
+
     /// Brings display row `row` into view at the next frame.
     pub(crate) fn scroll_to(&mut self, row: usize) {
         self.scroll_to = Some(row);
@@ -242,6 +247,8 @@ pub(crate) struct WipCounts {
 pub(crate) struct View<'a> {
     pub labels: &'a Labels,
     pub avatars: &'a crate::avatars::Avatars,
+    /// An active search dims the commits that do not match.
+    pub search: Option<&'a crate::search::Search>,
     pub wip: Option<WipCounts>,
     pub head: Option<&'a Oid>,
     pub now: i64,
@@ -505,6 +512,11 @@ impl History {
             FontId::proportional(13.0),
             t.text_dim,
         );
+        if let Some(search) = view.search.filter(|s| s.active())
+            && !search.is_match(commit)
+        {
+            p.rect_filled(cols.rect, 0.0, t.panel_bg.gamma_multiply(0.7));
+        }
         let refs: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
         let mut text = subject;
         if !refs.is_empty() {
