@@ -9,6 +9,7 @@ mod avatars;
 mod diffview;
 mod history;
 pub mod i18n;
+mod search;
 pub mod settings;
 mod sidebar;
 pub mod theme;
@@ -27,6 +28,7 @@ use crate::avatars::Avatars;
 use crate::diffview::Prepared;
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
+use crate::search::{BarAction, Search};
 use crate::settings::{Loaded, Settings};
 use crate::sidebar::Sidebar;
 use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
@@ -34,6 +36,9 @@ use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 
 /// Colour role of a file row; the colour itself comes from the theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +107,7 @@ pub struct RepoWindow {
     selection: Selection,
     details: Option<Details>,
     diff: Option<DiffState>,
+    search: Search,
     sidebar: Sidebar,
     settings: Settings,
     /// Where the settings are saved; `None` keeps them in memory (tests).
@@ -133,6 +139,7 @@ impl RepoWindow {
             selection: Selection::None,
             details: None,
             diff: None,
+            search: Search::default(),
             sidebar: Sidebar::default(),
             settings: Settings::default(),
             settings_dir: None,
@@ -239,6 +246,7 @@ impl RepoWindow {
         self.selection = Selection::None;
         self.details = None;
         self.diff = None;
+        self.search.close();
         self.apply(snapshot);
     }
 
@@ -319,6 +327,11 @@ impl RepoWindow {
             }
         }
         self.history.poll();
+        self.search.poll();
+        if self.search.jump_pending && self.first_match().is_some() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
+        }
         // Nothing selected yet: the commit at HEAD once it has loaded.
         if self.selection == Selection::None
             && let Some(head) = self.status().and_then(head_commit)
@@ -503,11 +516,32 @@ impl RepoWindow {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
-        if self.diff.is_some()
-            && !typing
+        if (self.diff.is_some() || self.search.open)
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
+            // The innermost first: an open diff, then the search.
+            if self.diff.is_some() {
+                self.diff = None;
+            } else {
+                self.search.close();
+            }
+        }
+        let (find, previous, next) = ctx.input_mut(|i| {
+            // Shift+F3 first, so that it does not also count as F3.
+            let find = i.consume_shortcut(&FIND);
+            let previous = i.consume_shortcut(&PREVIOUS);
+            let next = i.consume_shortcut(&NEXT);
+            (find, previous, next)
+        });
+        if find && self.repo.is_some() {
             self.diff = None;
+            self.search.open();
+        }
+        if next {
+            self.jump(true);
+        }
+        if previous {
+            self.jump(false);
         }
         let in_diff = self.diff.is_some();
         let (open, refresh, copy, focused, dropped, step) = ctx.input_mut(|i| {
@@ -705,6 +739,24 @@ impl RepoWindow {
 
     fn history_view(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
+        if self.search.open {
+            let (position, count) = self.match_position();
+            let (action, run) = self.search.bar(ui, t, position, count);
+            if let Some(e) = self.search.error() {
+                ui.label(RichText::new(error_text(e)).color(t.error_text));
+            }
+            if run && let Some(repo) = self.repo.clone() {
+                self.search.run(&repo, ui.ctx());
+                self.collect_search_now();
+            }
+            match action {
+                Some(BarAction::Next) => self.jump(true),
+                Some(BarAction::Previous) => self.jump(false),
+                Some(BarAction::Close) => self.search.close(),
+                None => {}
+            }
+            ui.add_space(2.0);
+        }
         if let Some(e) = self.history.error() {
             ui.label(RichText::new(error_text(e)).color(t.error_text));
         }
@@ -730,6 +782,7 @@ impl RepoWindow {
         let view = View {
             labels: &self.labels,
             avatars: &self.avatars,
+            search: Some(&self.search),
             wip,
             head: head.as_ref(),
             now,
@@ -849,7 +902,12 @@ impl RepoWindow {
             ui.add_space(8.0);
         }
         ui.label(
-            RichText::new(trf("{n} Dateien geändert", &[("n", &files.len())])).color(t.text_strong),
+            RichText::new(if files.len() == 1 {
+                tr("1 Datei geändert").to_owned()
+            } else {
+                trf("{n} Dateien geändert", &[("n", &files.len())])
+            })
+            .color(t.text_strong),
         );
         let current = self.diff.as_ref().map(|s| s.key.clone());
         let mut open = None;
@@ -945,6 +1003,74 @@ impl RepoWindow {
         if let Some((key, title)) = open {
             let ctx = ui.ctx().clone();
             self.open_diff(key, title, &ctx);
+        }
+    }
+
+    /// Commit indices (in the loaded history) that match the active search.
+    fn match_indices(&self) -> Vec<usize> {
+        if !self.search.active() {
+            return Vec::new();
+        }
+        self.history
+            .commits()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.search.is_match(c))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The selected commit's number among the matches, and the number of matches.
+    fn match_position(&self) -> (Option<usize>, usize) {
+        let matches = self.match_indices();
+        let selected = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let position = selected.and_then(|s| matches.iter().position(|m| *m == s).map(|p| p + 1));
+        (position, matches.len())
+    }
+
+    fn first_match(&self) -> Option<usize> {
+        self.match_indices().first().copied()
+    }
+
+    /// Selects the commit at index `i` of the history and scrolls to it.
+    fn jump_to(&mut self, i: Option<usize>) {
+        let Some(commit) = i.and_then(|i| self.history.commits().get(i)) else {
+            return;
+        };
+        self.select_commit(commit.id.clone());
+    }
+
+    /// The next (or previous) match after the selection; wraps around in the loaded history
+    /// and asks for more history while it is still loading.
+    fn jump(&mut self, forward: bool) {
+        let matches = self.match_indices();
+        if self.history.is_loading() {
+            self.history.load_more();
+        }
+        if matches.is_empty() {
+            return;
+        }
+        let current = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let target = match (current, forward) {
+            (Some(c), true) => matches.iter().find(|m| **m > c).or(matches.first()),
+            (Some(c), false) => matches.iter().rev().find(|m| **m < c).or(matches.last()),
+            (None, true) => matches.first(),
+            (None, false) => matches.last(),
+        };
+        self.jump_to(target.copied());
+    }
+
+    /// Commit-ID searches need no git: jump right away.
+    fn collect_search_now(&mut self) {
+        if self.search.jump_pending && !self.search.is_running() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
         }
     }
 
