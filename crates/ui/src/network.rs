@@ -49,7 +49,7 @@ impl Running {
 
 /// git's phase names in the UI language; the server's own (possibly localised) names as they
 /// are.
-fn phase_text(p: &Progress) -> String {
+pub(crate) fn phase_text(p: &Progress) -> String {
     let known = match p.phase.as_str() {
         "Enumerating objects" => Some("Objekte aufzählen"),
         "Counting objects" => Some("Objekte zählen"),

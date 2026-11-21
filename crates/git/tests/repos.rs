@@ -2317,3 +2317,141 @@ fn tags_are_pushed_one_or_all() {
         Err(GitError::InvalidName { .. })
     ));
 }
+
+fn clone_options(url: &str, dir: PathBuf) -> gitcraft_git::CloneOptions {
+    gitcraft_git::CloneOptions {
+        url: url.to_owned(),
+        dir,
+        branch: None,
+        depth: None,
+    }
+}
+
+#[test]
+fn clone_from_local_paths_and_file_urls() {
+    let f = with_remote();
+    f.push_from_other("b.txt", "2\n");
+    f.in_other(&["push", "-q", "origin", "HEAD:refs/heads/zweig"]);
+    let up = f.tmp.path().join("up.git");
+    let cancel = Cancel::new();
+    let runner = f.runner();
+
+    let plain = f.tmp.path().join("plain");
+    let made = runner
+        .clone_repository(
+            &clone_options(up.to_str().unwrap(), plain.clone()),
+            &cancel,
+            no_progress(),
+        )
+        .unwrap();
+    assert_eq!(made, plain);
+    assert!(plain.join("b.txt").exists());
+
+    // file:// URL, a branch, one commit deep, into an existing empty folder.
+    let shallow = f.tmp.path().join("shallow");
+    fs::create_dir(&shallow).unwrap();
+    let url = format!("file://{}", up.display()).replace('\\', "/");
+    let url = if url.starts_with("file:///") {
+        url
+    } else {
+        url.replacen("file://", "file:///", 1)
+    };
+    let mut options = clone_options(&url, shallow.clone());
+    options.branch = Some("zweig".into());
+    options.depth = Some(1);
+    runner
+        .clone_repository(&options, &cancel, no_progress())
+        .unwrap();
+    let repo = Repository::open(&runner, &shallow).unwrap();
+    let out = repo.status().unwrap();
+    assert!(matches!(out.head, Head::Branch { ref name, .. } if name == "zweig"));
+    let count = f
+        .command(&shallow)
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
+
+    // Not into a folder with something in it; not from a hostile URL.
+    assert!(matches!(
+        runner.clone_repository(
+            &clone_options(up.to_str().unwrap(), plain.clone()),
+            &cancel,
+            no_progress()
+        ),
+        Err(GitError::UnsafePath(_))
+    ));
+    let hostile = f.tmp.path().join("hostile");
+    assert!(matches!(
+        runner.clone_repository(
+            &clone_options("ext::sh -c touch% x", hostile.clone()),
+            &cancel,
+            no_progress()
+        ),
+        Err(GitError::InvalidUrl { .. })
+    ));
+    assert!(!hostile.exists());
+    let mut bad_branch = clone_options(up.to_str().unwrap(), hostile.clone());
+    bad_branch.branch = Some("--upload-pack=touch x".into());
+    assert!(matches!(
+        runner.clone_repository(&bad_branch, &cancel, no_progress()),
+        Err(GitError::InvalidValue(_))
+    ));
+    assert!(!hostile.exists());
+}
+
+/// A failed or cancelled clone removes the folder it created, and only empties a folder that was
+/// empty before.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_clone_removes_only_what_it_created() {
+    let f = Fixture::new();
+    let runner = f
+        .runner()
+        .env("GIT_SSH_COMMAND", "sh -c 'sleep 30'")
+        .env("GIT_SSH_VARIANT", "simple");
+    let cancel_after = |ms: u64| {
+        let cancel = Cancel::new();
+        let later = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            later.cancel();
+        });
+        cancel
+    };
+    let fresh = f.tmp.path().join("fresh");
+    let r = runner.clone_repository(
+        &clone_options("ssh://example.invalid/r.git", fresh.clone()),
+        &cancel_after(300),
+        no_progress(),
+    );
+    assert_eq!(r, Err(GitError::Cancelled));
+    assert!(!fresh.exists(), "created by the clone: removed");
+
+    let existing = f.tmp.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    let r = runner.clone_repository(
+        &clone_options("ssh://example.invalid/r.git", existing.clone()),
+        &cancel_after(300),
+        no_progress(),
+    );
+    assert_eq!(r, Err(GitError::Cancelled));
+    assert!(existing.is_dir(), "the user's folder stays");
+    assert_eq!(fs::read_dir(&existing).unwrap().count(), 0);
+
+    // A clone that fails on its own cleans up the same way.
+    let failed = f.tmp.path().join("failed");
+    assert!(
+        runner
+            .clone_repository(
+                &clone_options(
+                    f.tmp.path().join("missing.git").to_str().unwrap(),
+                    failed.clone()
+                ),
+                &Cancel::new(),
+                no_progress()
+            )
+            .is_err()
+    );
+    assert!(!failed.exists());
+}

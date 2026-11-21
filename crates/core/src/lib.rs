@@ -11,9 +11,11 @@
 //! - Every git call lands in the session's [`CommandLog`].
 
 pub mod askpass;
+mod clone;
 mod session;
 mod task;
 
+pub use clone::CloneJob;
 pub use session::{
     Command, DiffKey, Event, OperationId, Outcome, Reader, RepoSession, Snapshot, Wake,
 };

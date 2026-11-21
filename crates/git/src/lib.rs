@@ -8,6 +8,7 @@
 //!   [`Repository::stashes`], and [`Repository::log`] for the history in pages.
 
 mod branch;
+mod clone;
 mod command_log;
 mod compare;
 mod diff;
@@ -31,6 +32,7 @@ mod trust;
 mod undo;
 
 pub use branch::{Loss, LostCommit, NameProblem};
+pub use clone::{CloneOptions, clone_dir_name, has_submodules};
 pub use command_log::{CommandLog, LogEntry, redact};
 pub use compare::{COMPARE_LIMIT, Comparison};
 pub use diff::{ChangedFile, FileDiff, FileStatus, Hunk, Line, LineKind, MAX_LINES};
