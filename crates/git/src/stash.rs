@@ -7,14 +7,14 @@ use crate::{Cancel, Commit, GitError, Oid, Repository, Written};
 impl Repository {
     /// Parks the working tree's changes. `message` is attached to its option (never read as
     /// one); `untracked` includes untracked files, `keep_index` leaves staged changes in place.
-    /// Ok(false) when there was nothing to stash.
+    /// The new stash's id; `None` when there was nothing to stash.
     pub fn stash_push(
         &self,
         message: &str,
         untracked: bool,
         keep_index: bool,
         cancel: &Cancel,
-    ) -> Result<bool, GitError> {
+    ) -> Result<Option<Oid>, GitError> {
         let message_arg = format!("--message={}", message.trim());
         let mut args = vec!["stash", "push", message_arg.as_str()];
         if message.trim().is_empty() {
@@ -28,7 +28,11 @@ impl Repository {
         }
         let out = self.write(args, None, cancel)?;
         let text = String::from_utf8_lossy(&out.stdout);
-        Ok(!text.contains("No local changes to save"))
+        if text.contains("No local changes to save") {
+            return Ok(None);
+        }
+        let top = self.read(["rev-parse", "--verify", "--quiet", "refs/stash"])?;
+        Ok(Oid::parse(String::from_utf8_lossy(&top).trim()))
     }
 
     /// Applies a stash; with `pop` it is dropped afterwards (git keeps it when the apply has

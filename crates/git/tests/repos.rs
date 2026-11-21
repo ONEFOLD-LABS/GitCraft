@@ -1628,7 +1628,7 @@ fn stash_push_show_apply_pop_drop_and_restore() {
     let (f, repo) = two_commits();
     let c = Cancel::new();
     assert!(
-        !repo.stash_push("leer", false, false, &c).unwrap(),
+        repo.stash_push("leer", false, false, &c).unwrap().is_none(),
         "nothing to stash"
     );
     f.write("a.txt", "geparkt\n");
@@ -1636,6 +1636,7 @@ fn stash_push_show_apply_pop_drop_and_restore() {
     assert!(
         repo.stash_push("--force Versuch", false, false, &c)
             .unwrap()
+            .is_some()
     );
     assert_eq!(fs::read_to_string(f.repo().join("a.txt")).unwrap(), "2\n");
     assert!(
@@ -1674,7 +1675,7 @@ fn stash_push_show_apply_pop_drop_and_restore() {
     // Untracked files and keep-index.
     f.write("b.txt", "vorgemerkt");
     repo.stage(&paths(&["b.txt"]), &c).unwrap();
-    assert!(repo.stash_push("alles", true, true, &c).unwrap());
+    assert!(repo.stash_push("alles", true, true, &c).unwrap().is_some());
     assert!(!f.repo().join("neu.txt").exists(), "untracked included");
     assert!(
         f.repo().join("b.txt").exists(),
@@ -1827,4 +1828,97 @@ fn compare_diverged_branches() {
     assert_eq!(cmp.base, None);
     assert!(cmp.files.is_empty());
     assert_eq!(subj(&cmp.only_b), ["Fremd"]);
+}
+
+#[test]
+fn undo_a_commit_and_redo_it() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    let before = repo.head_commit().unwrap();
+    f.write("b.txt", "neu");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Drei", false, false, &c).unwrap();
+    let after = repo.head_commit().unwrap().unwrap();
+    // Uncommitted work elsewhere stays untouched.
+    f.write("a.txt", "lokal\n");
+    repo.move_head(Some(&after), before.as_ref(), true, &c)
+        .unwrap();
+    assert_eq!(repo.head_commit().unwrap(), before);
+    assert_eq!(
+        staged_names(&repo.status().unwrap()),
+        ["b.txt"],
+        "changes stay staged"
+    );
+    assert_eq!(
+        fs::read_to_string(f.repo().join("a.txt")).unwrap(),
+        "lokal\n"
+    );
+    // Not where it was left: refused.
+    assert_eq!(
+        repo.move_head(Some(&after), before.as_ref(), true, &c),
+        Err(GitError::Stale)
+    );
+    // Redo.
+    repo.move_head(before.as_ref(), Some(&after), false, &c)
+        .unwrap();
+    assert_eq!(repo.head_commit().unwrap(), Some(after.clone()));
+    assert_eq!(
+        repo.head_pos().unwrap(),
+        gitcraft_git::HeadPos::Branch("main".into())
+    );
+}
+
+#[test]
+fn undo_refuses_pushed_commits_and_handles_the_first_commit() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("a.txt", "1");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Erster", false, false, &c).unwrap();
+    let first = repo.head_commit().unwrap().unwrap();
+    // Undo of the first commit: back to an unborn branch, the file stays staged.
+    repo.move_head(Some(&first), None, true, &c).unwrap();
+    assert_eq!(
+        repo.head_pos().unwrap(),
+        gitcraft_git::HeadPos::Unborn("main".into())
+    );
+    assert_eq!(staged_names(&repo.status().unwrap()), ["a.txt"]);
+    repo.move_head(None, Some(&first), false, &c).unwrap();
+
+    let remote = f.tmp.path().join("remote.git");
+    assert!(
+        f.command(f.tmp.path())
+            .args(["init", "-q", "--bare"])
+            .arg(&remote)
+            .status()
+            .unwrap()
+            .success()
+    );
+    f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    f.git(&["push", "-q", "origin", "main"]);
+    assert_eq!(
+        repo.move_head(Some(&first), None, true, &c),
+        Err(GitError::Pushed)
+    );
+}
+
+#[test]
+fn refs_are_removed_only_where_they_were_left() {
+    let (_f, repo) = two_commits();
+    let c = Cancel::new();
+    let head = repo.head_commit().unwrap().unwrap();
+    repo.create_branch("tmp", head.as_str(), false, &c).unwrap();
+    let first = all_commits(&repo)[1].id.clone();
+    assert_eq!(
+        repo.delete_ref_if("refs/heads/tmp", &first, &c),
+        Err(GitError::Stale)
+    );
+    repo.delete_ref_if("refs/heads/tmp", &head, &c).unwrap();
+    assert!(matches!(
+        repo.delete_ref_if("refs/remotes/origin/x", &head, &c),
+        Err(GitError::InvalidValue(_))
+    ));
+    let tag = repo.create_tag("t", "HEAD", Some("m"), false, &c).unwrap();
+    assert_ne!(tag, head, "an annotated tag's own object");
+    repo.delete_ref_if("refs/tags/t", &tag, &c).unwrap();
 }

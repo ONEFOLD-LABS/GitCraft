@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, Comparison, Discarded, FileDiff, GitError, GitRunner,
-    Identity, LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash,
-    Status, TrustReport, Written,
+    HeadPos, Identity, LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream,
+    Stash, Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -171,6 +171,18 @@ pub enum Command {
         a: String,
         b: String,
     },
+    /// Move the current branch from `expected` to `to` without touching index or working tree
+    /// (`reset --soft`, or `update-ref -d` back to no commit); for undoing and redoing commits.
+    MoveHead {
+        expected: Option<Oid>,
+        to: Option<Oid>,
+        refuse_pushed: bool,
+    },
+    /// Remove a branch or tag ref only while it points at `expected` (`update-ref -d`).
+    DeleteRefIf {
+        full: String,
+        expected: Oid,
+    },
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -246,6 +258,8 @@ impl Command {
             | Command::CreateTag { .. }
             | Command::DeleteTag(_)
             | Command::RestoreTag { .. }
+            | Command::MoveHead { .. }
+            | Command::DeleteRefIf { .. }
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -289,8 +303,23 @@ pub enum Outcome {
     Loss(Loss),
     /// A branch was deleted; the commit it pointed to.
     Deleted(Oid),
-    /// Whether there was anything to stash.
-    Stashed(bool),
+    /// The new stash; `None` when there was nothing to stash.
+    Stashed(Option<Oid>),
+    /// A commit was made: HEAD before (`None` on an unborn branch) and after.
+    Committed {
+        output: Written,
+        before: Option<Oid>,
+        after: Option<Oid>,
+    },
+    /// HEAD moved to another branch or commit; where it was.
+    Switched(HeadPos),
+    /// A branch was created at `tip`; `from` is where HEAD was when it was also checked out.
+    BranchCreated {
+        tip: Oid,
+        from: Option<HeadPos>,
+    },
+    /// A tag was created; the object its ref points to.
+    Tagged(Oid),
     Commit(Box<Commit>),
     Comparison(Box<Comparison>),
     /// A write finished; git's output (hooks, notes).
@@ -581,9 +610,27 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
             name,
             start,
             checkout,
-        } => Outcome::Written(repo.create_branch(name, start, *checkout, cancel)?),
-        Command::SwitchBranch(name) => Outcome::Written(repo.switch_branch(name, cancel)?),
-        Command::SwitchDetached(id) => Outcome::Written(repo.switch_detached(id, cancel)?),
+        } => {
+            let from = if *checkout {
+                Some(repo.head_pos()?)
+            } else {
+                None
+            };
+            repo.create_branch(name, start, *checkout, cancel)?;
+            let full = format!("refs/heads/{name}");
+            let tip = repo.resolve_commit(&full)?;
+            Outcome::BranchCreated { tip, from }
+        }
+        Command::SwitchBranch(name) => {
+            let from = repo.head_pos()?;
+            repo.switch_branch(name, cancel)?;
+            Outcome::Switched(from)
+        }
+        Command::SwitchDetached(id) => {
+            let from = repo.head_pos()?;
+            repo.switch_detached(id, cancel)?;
+            Outcome::Switched(from)
+        }
         Command::RenameBranch { old, new } => {
             Outcome::Written(repo.rename_branch(old, new, cancel)?)
         }
@@ -611,19 +658,39 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
             target,
             message,
             sign,
-        } => Outcome::Written(repo.create_tag(name, target, message.as_deref(), *sign, cancel)?),
+        } => Outcome::Tagged(repo.create_tag(name, target, message.as_deref(), *sign, cancel)?),
         Command::DeleteTag(name) => Outcome::Deleted(repo.delete_tag(name, cancel)?),
         Command::RestoreTag { name, object } => {
             repo.restore_tag(name, object, cancel)?;
             Outcome::Written(Written::default())
         }
         Command::Compare { a, b } => Outcome::Comparison(Box::new(repo.compare(a, b)?)),
+        Command::MoveHead {
+            expected,
+            to,
+            refuse_pushed,
+        } => {
+            repo.move_head(expected.as_ref(), to.as_ref(), *refuse_pushed, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::DeleteRefIf { full, expected } => {
+            repo.delete_ref_if(full, expected, cancel)?;
+            Outcome::Written(Written::default())
+        }
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {
             message,
             amend,
             no_verify,
-        } => Outcome::Written(repo.commit(message, *amend, *no_verify, cancel)?),
+        } => {
+            let before = repo.head_commit()?;
+            let output = repo.commit(message, *amend, *no_verify, cancel)?;
+            Outcome::Committed {
+                output,
+                before,
+                after: repo.head_commit()?,
+            }
+        }
         Command::Identity => Outcome::Identity(repo.identity()?),
         Command::SetIdentity {
             name,
