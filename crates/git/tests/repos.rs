@@ -1337,3 +1337,169 @@ fn stage_single_lines() {
         .unwrap();
     assert_eq!(staged_text(&f), "a\nc\nd\n");
 }
+
+fn read(f: &Fixture, rel: &str) -> Option<String> {
+    fs::read_to_string(f.repo().join(rel)).ok()
+}
+
+#[test]
+fn discard_and_restore_round_trip() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("a.txt", "1\n");
+    f.write("b.txt", "1\n");
+    f.write("gone.txt", "1\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Anfang", false, false, &c).unwrap();
+    // a: unstaged only; b: staged change plus a further unstaged one; gone: deleted.
+    f.write("a.txt", "2\n");
+    f.write("b.txt", "staged\n");
+    repo.stage(&paths(&["b.txt"]), &c).unwrap();
+    f.write("b.txt", "staged and more\n");
+    fs::remove_file(f.repo().join("gone.txt")).unwrap();
+
+    let saved = repo
+        .discard(&paths(&["a.txt", "b.txt", "gone.txt"]), &c)
+        .unwrap();
+    assert!(saved.starts_with("refs/gitcraft/discarded/"));
+    assert_eq!(read(&f, "a.txt").as_deref(), Some("1\n"));
+    assert_eq!(
+        read(&f, "b.txt").as_deref(),
+        Some("staged\n"),
+        "back to the index"
+    );
+    assert_eq!(read(&f, "gone.txt").as_deref(), Some("1\n"));
+    assert_eq!(
+        staged_names(&repo.status().unwrap()),
+        ["b.txt"],
+        "index untouched"
+    );
+
+    // Survives garbage collection.
+    f.git(&["gc", "-q", "--prune=now"]);
+    let list = repo.discarded().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].files, paths(&["a.txt", "b.txt"]));
+    assert_eq!(list[0].absent, paths(&["gone.txt"]));
+
+    let before = repo.restore_discarded(&saved, &c).unwrap();
+    assert_eq!(read(&f, "a.txt").as_deref(), Some("2\n"));
+    assert_eq!(read(&f, "b.txt").as_deref(), Some("staged and more\n"));
+    assert_eq!(read(&f, "gone.txt"), None, "the deletion is back too");
+    let list = repo.discarded().unwrap();
+    assert_eq!(
+        list.len(),
+        1,
+        "the restored entry is gone, the state before it is kept"
+    );
+    assert_eq!(list[0].id, before);
+}
+
+#[test]
+fn discard_single_lines() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("f.txt", "a\nb\nc\nd\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Anfang", false, false, &c).unwrap();
+    f.write("f.txt", "a\nB\nc\nD\n");
+    let p = RepoPath::from_bytes(b"f.txt");
+    let shown = repo.worktree_diff(&p, None, false).unwrap();
+    // Discard only the change of line 2 (the "-b" and "+B" lines).
+    let picked: Vec<(usize, usize)> = shown.hunks[0]
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.text == b"b" || l.text == b"B")
+        .map(|(i, _)| (0, i))
+        .collect();
+    assert_eq!(picked.len(), 2);
+    let saved = repo.discard_lines(&p, &shown, &picked, &c).unwrap();
+    assert_eq!(read(&f, "f.txt").as_deref(), Some("a\nb\nc\nD\n"));
+    // Changed since display: refused.
+    f.write("f.txt", "x\n");
+    assert_eq!(
+        repo.discard_lines(&p, &shown, &picked, &c),
+        Err(GitError::Stale)
+    );
+    f.write("f.txt", "a\nb\nc\nD\n");
+    repo.restore_discarded(&saved, &c).unwrap();
+    assert_eq!(read(&f, "f.txt").as_deref(), Some("a\nB\nc\nD\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_untracked_files_safely() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("tracked.txt", "t");
+    f.write(".gitignore", "*.log\n");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Anfang", false, false, &c).unwrap();
+    let outside = f.tmp.path().join("outside.txt");
+    fs::write(&outside, "keep me").unwrap();
+    f.write("deep/er/neu.txt", "neu");
+    f.write("zwei\nzeilen.txt", "z");
+    f.write("debug.log", "ignored");
+    std::os::unix::fs::symlink(&outside, f.repo().join("link")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.write("run.sh", "#!/bin/sh\n");
+        fs::set_permissions(f.repo().join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Ignored and tracked files are refused, nothing is deleted.
+    for refused in [
+        &["debug.log"][..],
+        &["tracked.txt"],
+        &["deep/er/neu.txt", "debug.log"],
+    ] {
+        assert!(matches!(
+            repo.delete_untracked(&paths(refused), &c),
+            Err(GitError::UnsafePath(_))
+        ));
+    }
+    assert!(f.repo().join("deep/er/neu.txt").exists());
+
+    let names = ["deep/er/neu.txt", "zwei\nzeilen.txt", "link", "run.sh"];
+    let saved = repo.delete_untracked(&paths(&names), &c).unwrap();
+    for n in names {
+        assert!(
+            fs::symlink_metadata(f.repo().join(n)).is_err(),
+            "{n:?} deleted"
+        );
+    }
+    assert!(!f.repo().join("deep").exists(), "empty folders removed");
+    assert_eq!(
+        fs::read_to_string(&outside).unwrap(),
+        "keep me",
+        "link target untouched"
+    );
+    assert!(f.repo().join("debug.log").exists());
+
+    repo.restore_discarded(&saved, &c).unwrap();
+    assert_eq!(read(&f, "deep/er/neu.txt").as_deref(), Some("neu"));
+    assert_eq!(read(&f, "zwei\nzeilen.txt").as_deref(), Some("z"));
+    assert_eq!(fs::read_link(f.repo().join("link")).unwrap(), outside);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(f.repo().join("run.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111, "executable again");
+}
+
+#[test]
+fn old_discarded_states_are_pruned() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("a.txt", "1");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Anfang", false, false, &c).unwrap();
+    f.write("a.txt", "2");
+    repo.discard(&paths(&["a.txt"]), &c).unwrap();
+    assert_eq!(repo.prune_discarded(3600, &c).unwrap(), 0);
+    assert_eq!(repo.prune_discarded(-1, &c).unwrap(), 1);
+    assert!(repo.discarded().unwrap().is_empty());
+}

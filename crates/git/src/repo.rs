@@ -209,7 +209,7 @@ impl Repository {
             .unwrap_or_default())
     }
 
-    fn worktree_diff_raw(
+    pub(crate) fn worktree_diff_raw(
         &self,
         path: &RepoPath,
         old_path: Option<&RepoPath>,
@@ -500,9 +500,13 @@ impl Repository {
         }
     }
 
+    pub(crate) fn runner_ref(&self) -> &GitRunner {
+        &self.runner
+    }
+
     /// A write in the working tree (no configuration overrides: the repository is trusted
     /// before core lets a write run, ADR-006 and docs/security.md T1).
-    fn write<I, S>(
+    pub(crate) fn write<I, S>(
         &self,
         args: I,
         input: Option<&[u8]>,
@@ -517,7 +521,7 @@ impl Repository {
 
     /// A write whose paths come on stdin, NUL-separated, as literal pathspecs: no path can
     /// become an option or pathspec magic, and no command line grows too long.
-    fn write_paths(
+    pub(crate) fn write_paths(
         &self,
         command: &[&str],
         paths: &[RepoPath],
@@ -548,6 +552,35 @@ impl Repository {
             args.push("--no-verify");
         }
         self.write(args, Some(message.as_bytes()), cancel)
+    }
+
+    /// Added plus removed lines of the unstaged changes of `paths` (binary files count 0).
+    pub fn unstaged_lines(&self, paths: &[RepoPath]) -> Result<u64, GitError> {
+        let mut args: Vec<OsString> = [
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--numstat",
+            "-z",
+            "--",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        args.extend(paths.iter().map(path_arg));
+        let out = self.read(args)?;
+        let mut total = 0u64;
+        for rec in out.split(|b| *b == 0) {
+            let mut f = rec.splitn(3, |b| *b == b'\t');
+            let n = |x: Option<&[u8]>| {
+                x.and_then(|x| std::str::from_utf8(x).ok())
+                    .and_then(|x| x.trim_start_matches('\n').parse::<u64>().ok())
+                    .unwrap_or(0)
+            };
+            total = total
+                .saturating_add(n(f.next()))
+                .saturating_add(n(f.next()));
+        }
+        Ok(total)
     }
 
     /// The configured author identity (`user.name`, `user.email`); `None` where it is missing.

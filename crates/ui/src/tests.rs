@@ -338,6 +338,12 @@ fn texts_behind_variables_are_translated() {
         "Commit-ID kopieren",
         "Committen (im Commit-Formular)",
         "Zeilen im Diff wählen und vormerken",
+        "Verwerfen …",
+        "Löschen …",
+        "Verwirft die Änderungen an 1 Datei ({zeilen}).",
+        "Verwirft die Änderungen an {n} Dateien ({zeilen}).",
+        "Löscht 1 unversionierte Datei.",
+        "Löscht {n} unversionierte Dateien.",
         "Hunk vormerken",
         "Hunk zurücknehmen",
         "Auswahl vormerken ({n})",
@@ -1004,4 +1010,81 @@ fn a_stale_diff_is_not_applied() {
     settle(&mut h);
     assert!(h.state().error().is_some_and(|e| e.contains("geändert")));
     assert_eq!(index_text(&f), numbered(&[]));
+}
+
+fn file_text(f: &Fixture, rel: &str) -> Option<String> {
+    fs::read_to_string(f.repo().join(rel)).ok()
+}
+
+/// Discard from the context menu asks first (naming files and lines), then saves, discards and
+/// offers to undo.
+#[test]
+fn discard_asks_first_and_can_be_undone() {
+    let f = Fixture::new();
+    f.write("a.txt", "1\n2\n");
+    f.commit_all("Anfang");
+    f.write("a.txt", "eins\n2\ndrei\n");
+    let mut h = harness(f.window());
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "a.txt")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Verwerfen …").click();
+    settle(&mut h);
+    h.get_by_label("Verwirft die Änderungen an 1 Datei (3 Zeilen).");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("discard-confirm-dark.png"))
+            .unwrap();
+    }
+    // Cancel changes nothing.
+    h.get_by_label("Abbrechen").click();
+    h.run_steps(2);
+    assert!(h.state().confirm.is_none());
+    assert_eq!(file_text(&f, "a.txt").as_deref(), Some("eins\n2\ndrei\n"));
+
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "a.txt")
+        .click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Verwerfen …").click();
+    settle(&mut h);
+    h.get_by_label("Verwerfen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(file_text(&f, "a.txt").as_deref(), Some("1\n2\n"));
+    assert_eq!(h.state().discarded.len(), 1);
+    h.get_by_label("1 Datei verworfen.");
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert_eq!(file_text(&f, "a.txt").as_deref(), Some("eins\n2\ndrei\n"));
+}
+
+/// An untracked file is deleted from its diff and comes back from "Zuletzt verworfen".
+#[test]
+fn delete_untracked_and_restore_from_the_list() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    f.write("neu/notiz.txt", "wichtig");
+    let mut w = f.window();
+    w.open_diff(
+        DiffKey::Untracked {
+            path: RepoPath::from_bytes(b"neu/notiz.txt"),
+        },
+        "neu/notiz.txt".into(),
+    );
+    let mut h = harness(w);
+    settle(&mut h);
+    h.get_by_label("Löschen …").click();
+    settle(&mut h);
+    h.get_by_label("Löscht 1 unversionierte Datei.");
+    h.get_by_label("Löschen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert!(!f.repo().join("neu").exists());
+    h.get_by_label("Schließen").click();
+    settle(&mut h);
+    h.get_by_label("Zuletzt verworfen (1)").click();
+    settle(&mut h);
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert_eq!(file_text(&f, "neu/notiz.txt").as_deref(), Some("wichtig"));
 }

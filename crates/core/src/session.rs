@@ -7,8 +7,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
-    Cancel, ChangedFile, CommandLog, Commit, FileDiff, GitError, GitRunner, Identity, LogReader,
-    Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
+    Cancel, ChangedFile, CommandLog, Commit, Discarded, FileDiff, GitError, GitRunner, Identity,
+    LogReader, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport,
+    Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -82,6 +83,25 @@ pub enum Command {
         shown: Box<FileDiff>,
         lines: Vec<(usize, usize)>,
     },
+    /// Discard unstaged changes of tracked files, after saving them (`hash-object`,
+    /// `commit-tree`, `update-ref refs/gitcraft/discarded/…`, `restore --worktree`).
+    Discard(Vec<RepoPath>),
+    /// Discard some lines of a file's unstaged diff, after saving the file (`apply --reverse`).
+    DiscardLines {
+        path: RepoPath,
+        shown: Box<FileDiff>,
+        lines: Vec<(usize, usize)>,
+    },
+    /// Delete untracked files, after saving them.
+    DeleteUntracked(Vec<RepoPath>),
+    /// The saved states (`for-each-ref refs/gitcraft/discarded`).
+    ListDiscarded,
+    /// Write a saved state back (the current state is saved first).
+    RestoreDiscarded(String),
+    /// Remove saved states older than this many seconds.
+    PruneDiscarded(i64),
+    /// Added plus removed unstaged lines of files (`diff --numstat`), for a confirmation.
+    CountLines(Vec<RepoPath>),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
     /// [--no-verify]`, message on stdin).
     Commit {
@@ -111,7 +131,9 @@ const DETAILS: usize = 1;
 const DIFF: usize = 2;
 const IDENTITY: usize = 3;
 const AMEND: usize = 4;
-const SLOTS: usize = 5;
+const DISCARDED: usize = 5;
+const COUNT: usize = 6;
+const SLOTS: usize = 7;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
@@ -121,12 +143,19 @@ impl Command {
             | Command::CommitDetails(_)
             | Command::Diff(_)
             | Command::Identity
-            | Command::AmendInfo => false,
+            | Command::AmendInfo
+            | Command::ListDiscarded
+            | Command::CountLines(_) => false,
             Command::Stage(_)
             | Command::StageAll
             | Command::Unstage(_)
             | Command::UnstageAll
             | Command::StageLines { .. }
+            | Command::Discard(_)
+            | Command::DiscardLines { .. }
+            | Command::DeleteUntracked(_)
+            | Command::RestoreDiscarded(_)
+            | Command::PruneDiscarded(_)
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -141,6 +170,8 @@ impl Command {
             Command::Diff(_) => Some(DIFF),
             Command::Identity => Some(IDENTITY),
             Command::AmendInfo => Some(AMEND),
+            Command::ListDiscarded => Some(DISCARDED),
+            Command::CountLines(_) => Some(COUNT),
             _ => None,
         }
     }
@@ -158,6 +189,10 @@ pub enum Outcome {
     Identity(Identity),
     /// The message of `HEAD` and whether a remote has it; `None` before the first commit.
     AmendInfo(Option<(String, bool)>),
+    /// Contents were saved before a destructive command; the ref that keeps them.
+    Saved(String),
+    Discarded(Vec<Discarded>),
+    Lines(u64),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
 }
@@ -429,6 +464,18 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         } => {
             Outcome::Written(repo.stage_lines(path, old.as_ref(), *staged, shown, lines, cancel)?)
         }
+        Command::Discard(paths) => Outcome::Saved(repo.discard(paths, cancel)?),
+        Command::DiscardLines { path, shown, lines } => {
+            Outcome::Saved(repo.discard_lines(path, shown, lines, cancel)?)
+        }
+        Command::DeleteUntracked(paths) => Outcome::Saved(repo.delete_untracked(paths, cancel)?),
+        Command::ListDiscarded => Outcome::Discarded(repo.discarded()?),
+        Command::RestoreDiscarded(id) => Outcome::Saved(repo.restore_discarded(id, cancel)?),
+        Command::PruneDiscarded(keep) => {
+            repo.prune_discarded(*keep, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::CountLines(paths) => Outcome::Lines(repo.unstaged_lines(paths)?),
         Command::Commit {
             message,
             amend,

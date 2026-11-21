@@ -46,6 +46,10 @@ pub(crate) enum DiffAction {
     Act,
     /// Stage or unstage these (hunk, line) positions.
     Lines(Vec<(usize, usize)>),
+    /// Discard the file's changes (or delete it, when untracked); asks first.
+    Discard,
+    /// Discard these (hunk, line) positions; asks first.
+    DiscardLines(Vec<(usize, usize)>),
 }
 
 /// Which side of the index a working-tree diff shows; decides the button labels.
@@ -251,6 +255,7 @@ impl Prepared {
         t: &Tokens,
         action: Option<&'static str>,
         side: Option<Side>,
+        discard: Option<&'static str>,
     ) -> DiffAction {
         let partial = self.partial(side);
         let mut back = DiffAction::None;
@@ -266,6 +271,13 @@ impl Prepared {
                 && ui.button(tr(label)).clicked()
             {
                 back = DiffAction::Act;
+            }
+            if let Some(label) = discard
+                && ui
+                    .button(RichText::new(tr(label)).color(t.deleted))
+                    .clicked()
+            {
+                back = DiffAction::Discard;
             }
             ui.label(RichText::new(&self.title).color(t.text_strong).size(15.0));
             ui.label(RichText::new(format!("+{}", self.added)).color(t.added));
@@ -283,6 +295,16 @@ impl Prepared {
                     .clicked()
                 {
                     back = DiffAction::Lines(self.selected_lines());
+                }
+                if side == Side::Unstaged
+                    && ui
+                        .button(
+                            RichText::new(trf("Auswahl verwerfen ({n}) …", &[("n", &n)]))
+                                .color(t.deleted),
+                        )
+                        .clicked()
+                {
+                    back = DiffAction::DiscardLines(self.selected_lines());
                 }
                 if ui.button(tr("Auswahl aufheben")).clicked() {
                     self.selected.clear();
