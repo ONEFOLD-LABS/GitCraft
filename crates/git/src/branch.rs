@@ -204,12 +204,13 @@ fn invalid(name: &str, problem: NameProblem) -> GitError {
 
 /// Turns git's refusal to overwrite local changes into [`GitError::WouldOverwrite`] with the
 /// files it named.
-fn overwrite(e: GitError) -> GitError {
+pub(crate) fn overwrite(e: GitError) -> GitError {
     let GitError::Failed { stderr, .. } = &e else {
         return e;
     };
-    if !stderr.contains("would be overwritten by checkout")
-        && !stderr.contains("would be overwritten by switch")
+    if !["checkout", "switch", "merge"]
+        .iter()
+        .any(|op| stderr.contains(&format!("would be overwritten by {op}")))
     {
         return e;
     }

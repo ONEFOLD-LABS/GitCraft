@@ -123,6 +123,31 @@ pub enum Command {
     BranchLoss(String),
     /// Commits only the detached HEAD holds.
     DetachedLoss,
+    /// Park the changes (`stash push [--message=…] [--include-untracked] [--keep-index]`).
+    StashPush {
+        message: String,
+        untracked: bool,
+        keep_index: bool,
+    },
+    /// Apply a stash, with `pop` dropping it afterwards (`stash apply|pop stash@{n}`).
+    StashApply {
+        selector: String,
+        id: Oid,
+        pop: bool,
+    },
+    /// Drop a stash (`stash drop stash@{n}`).
+    StashDrop {
+        selector: String,
+        id: Oid,
+        message: String,
+    },
+    /// Put a dropped stash back (`stash store`).
+    StashStore {
+        id: Oid,
+        message: String,
+    },
+    /// A commit by id, e.g. a stash (`log -1`).
+    LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
     /// [--no-verify]`, message on stdin).
     Commit {
@@ -155,7 +180,8 @@ const AMEND: usize = 4;
 const DISCARDED: usize = 5;
 const COUNT: usize = 6;
 const LOSS: usize = 7;
-const SLOTS: usize = 8;
+const LOAD: usize = 8;
+const SLOTS: usize = 9;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
@@ -169,7 +195,8 @@ impl Command {
             | Command::ListDiscarded
             | Command::CountLines(_)
             | Command::BranchLoss(_)
-            | Command::DetachedLoss => false,
+            | Command::DetachedLoss
+            | Command::LoadCommit(_) => false,
             Command::Stage(_)
             | Command::StageAll
             | Command::Unstage(_)
@@ -185,6 +212,10 @@ impl Command {
             | Command::SwitchDetached(_)
             | Command::RenameBranch { .. }
             | Command::DeleteBranch(_)
+            | Command::StashPush { .. }
+            | Command::StashApply { .. }
+            | Command::StashDrop { .. }
+            | Command::StashStore { .. }
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -202,6 +233,7 @@ impl Command {
             Command::ListDiscarded => Some(DISCARDED),
             Command::CountLines(_) => Some(COUNT),
             Command::BranchLoss(_) | Command::DetachedLoss => Some(LOSS),
+            Command::LoadCommit(_) => Some(LOAD),
             _ => None,
         }
     }
@@ -226,6 +258,9 @@ pub enum Outcome {
     Loss(Loss),
     /// A branch was deleted; the commit it pointed to.
     Deleted(Oid),
+    /// Whether there was anything to stash.
+    Stashed(bool),
+    Commit(Box<Commit>),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
 }
@@ -522,6 +557,23 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         Command::DeleteBranch(name) => Outcome::Deleted(repo.delete_branch(name, cancel)?),
         Command::BranchLoss(name) => Outcome::Loss(repo.branch_loss(name)?),
         Command::DetachedLoss => Outcome::Loss(repo.detached_loss()?),
+        Command::StashPush {
+            message,
+            untracked,
+            keep_index,
+        } => Outcome::Stashed(repo.stash_push(message, *untracked, *keep_index, cancel)?),
+        Command::StashApply { selector, id, pop } => {
+            Outcome::Written(repo.stash_apply(selector, id, *pop, cancel)?)
+        }
+        Command::StashDrop { selector, id, .. } => {
+            repo.stash_drop(selector, id, cancel)?;
+            Outcome::Deleted(id.clone())
+        }
+        Command::StashStore { id, message } => {
+            repo.stash_store(id, message, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {
             message,
             amend,

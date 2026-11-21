@@ -53,8 +53,24 @@ pub(crate) enum Dialog {
     Detach { id: Oid, label: String },
     /// Leaving a detached HEAD: `loss` are the commits only it holds.
     Leave { target: Target, loss: Option<Loss> },
-    /// A switch stopped because it would overwrite these files.
-    Overwrite { files: Vec<String> },
+    /// A switch stopped because it would overwrite these files; `target` is where it went.
+    Overwrite {
+        files: Vec<String>,
+        target: Option<Target>,
+    },
+    /// Park the changes.
+    Stash {
+        message: String,
+        untracked: bool,
+        keep_index: bool,
+        focus: bool,
+    },
+    /// Drop a stash (asks; its id stays for restoring).
+    DropStash {
+        selector: String,
+        id: Oid,
+        message: String,
+    },
 }
 
 /// What the user decided.
@@ -64,6 +80,8 @@ pub(crate) enum Decision {
     Open,
     Close,
     Run(Command),
+    /// Several writes in this order (e.g. stash, then switch).
+    RunAll(Vec<Command>),
     /// Check out a commit (after the explanation); the window checks for a detached HEAD
     /// that would be left first.
     Switch(Target),
@@ -109,6 +127,8 @@ impl Dialog {
             Dialog::Detach { .. } => "Commit auschecken?",
             Dialog::Leave { .. } => "Commits würden unerreichbar",
             Dialog::Overwrite { .. } => "Wechsel nicht möglich",
+            Dialog::Stash { .. } => "Änderungen parken (Stash)",
+            Dialog::DropStash { .. } => "Stash löschen?",
         }
     }
 
@@ -301,7 +321,70 @@ impl Dialog {
                     }
                 });
             }
-            Dialog::Overwrite { files } => {
+            Dialog::Stash {
+                message,
+                untracked,
+                keep_index,
+                focus,
+            } => {
+                ui.label(tr(
+                    "Legt die Änderungen beiseite; der Arbeitsstand ist danach wieder der letzte Commit.",
+                ));
+                let l = ui.label(tr("Nachricht (optional)"));
+                let field = ui
+                    .add(egui::TextEdit::singleline(message).desired_width(f32::INFINITY))
+                    .labelled_by(l.id);
+                if std::mem::take(focus) {
+                    field.request_focus();
+                }
+                ui.checkbox(untracked, tr("Unversionierte Dateien mitnehmen"));
+                ui.checkbox(keep_index, tr("Vorgemerkte Änderungen dalassen"))
+                    .on_hover_text("--keep-index");
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Stashen")).clicked() || enter {
+                        decision = Decision::Run(Command::StashPush {
+                            message: message.trim().to_owned(),
+                            untracked: *untracked,
+                            keep_index: *keep_index,
+                        });
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::DropStash {
+                selector,
+                id,
+                message,
+            } => {
+                ui.label(trf(
+                    "Löscht den Stash {stash}.",
+                    &[("stash", &escape(message))],
+                ));
+                ui.label(
+                    RichText::new(trf(
+                        "Seine ID {id} bleibt im Hinweis danach; „Wiederherstellen“ legt ihn wieder an.",
+                        &[("id", &id.short())],
+                    ))
+                    .color(t.text_dim),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(danger(t, tr("Löschen"))).clicked() {
+                        decision = Decision::Run(Command::StashDrop {
+                            selector: selector.clone(),
+                            id: id.clone(),
+                            message: message.clone(),
+                        });
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::Overwrite { files, target } => {
                 ui.label(tr(
                     "Der Wechsel würde lokale Änderungen an diesen Dateien überschreiben; es wurde nichts geändert:",
                 ));
@@ -318,9 +401,23 @@ impl Dialog {
                     .color(t.text_dim),
                 );
                 ui.add_space(6.0);
-                if ui.button(tr("Schließen")).clicked() {
-                    decision = Decision::Close;
-                }
+                ui.horizontal(|ui| {
+                    if let Some(target) = target
+                        && ui.button(tr("Stashen und wechseln")).clicked()
+                    {
+                        decision = Decision::RunAll(vec![
+                            Command::StashPush {
+                                message: tr("Vor dem Wechsel").to_owned(),
+                                untracked: false,
+                                keep_index: false,
+                            },
+                            target.command(),
+                        ]);
+                    }
+                    if ui.button(tr("Schließen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
             }
         }
         decision

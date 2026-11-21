@@ -271,3 +271,23 @@ Wechsel nicht möglich	Cannot switch
 Der Name ist unverändert.	The name is unchanged.
 Löscht den Branch {name} mit 1 Commit, der auf keinem anderen Branch liegt:	Deletes the branch {name} with 1 commit that is on no other branch:
 HEAD ist losgelöst und hält 1 Commit, der auf keinem Branch liegt. Nach dem Wechsel ist er nur noch über seine ID erreichbar:	HEAD is detached and holds 1 commit that is on no branch. After switching it can only be reached by its ID:
+Anwenden	Apply
+Anwenden und entfernen (Pop)	Apply and remove (pop)
+Beim Anwenden sind Konflikte entstanden ({dateien}). Der Stash bleibt erhalten; löse die Konflikte in der Änderungsliste.	Applying caused conflicts ({dateien}). The stash is kept; resolve the conflicts in the change list.
+Doppelklick wendet ihn an	Double click applies it
+Legt die Änderungen beiseite; der Arbeitsstand ist danach wieder der letzte Commit.	Puts the changes aside; the working tree is back at the last commit afterwards.
+Löscht den Stash {stash}.	Deletes the stash {stash}.
+Nachricht (optional)	Message (optional)
+Nichts zu parken.	Nothing to stash.
+Seine ID {id} bleibt im Hinweis danach; „Wiederherstellen“ legt ihn wieder an.	Its ID {id} stays in the notice afterwards; "Restore" adds it again.
+Stash angewendet und entfernt.	Stash applied and removed.
+Stash angewendet.	Stash applied.
+Stash gelöscht ({id}).	Stash deleted ({id}).
+Stashen	Stash
+Stashen und wechseln	Stash and switch
+Unversionierte Dateien mitnehmen	Include untracked files
+Vor dem Wechsel	Before switching
+Vorgemerkte Änderungen dalassen	Keep staged changes
+Änderungen geparkt. „Pop“ holt sie zurück.	Changes stashed. "Pop" brings them back.
+Änderungen parken (Stash)	Stash changes
+Stash löschen?	Delete stash?
