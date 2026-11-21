@@ -15,6 +15,7 @@ mod discard;
 mod history;
 pub mod i18n;
 mod network;
+mod prompt;
 mod remotes;
 mod search;
 pub mod settings;
@@ -192,6 +193,11 @@ pub struct RepoWindow {
     remote_dialog: Option<remotes::Dialog>,
     /// A fetch or pull that is running.
     running: Option<network::Running>,
+    /// Where git and ssh ask the user (the askpass bridge), when enabled.
+    askpass: Option<gitcraft_core::askpass::Askpass>,
+    /// The open question from git, and those waiting behind it.
+    prompt: Option<prompt::PromptDialog>,
+    prompts: std::collections::VecDeque<gitcraft_core::askpass::Prompt>,
     /// Saved states of discarded and deleted files, newest first.
     discarded: Vec<Discarded>,
     show_discarded: bool,
@@ -241,6 +247,9 @@ impl RepoWindow {
             branch_dialog: None,
             remote_dialog: None,
             running: None,
+            askpass: None,
+            prompt: None,
+            prompts: std::collections::VecDeque::new(),
             extra_commit: None,
             compare: None,
             undo: undo::History::default(),
@@ -257,6 +266,46 @@ impl RepoWindow {
             pending_open: initial,
             version_requested: false,
             was_focused: true,
+        }
+    }
+
+    /// Lets git and ssh ask for passwords, passphrases and host keys in this window, through
+    /// `exe` started in helper mode (ADR-003). Repositories opened afterwards use it.
+    pub fn use_askpass(&mut self, ctx: &egui::Context, exe: &Path) {
+        match gitcraft_core::askpass::Askpass::start(wake(ctx)) {
+            Ok(askpass) => {
+                let mut runner = self.runner.clone();
+                for (key, value) in askpass.env(exe) {
+                    runner = runner.env(key, value);
+                }
+                self.runner = runner;
+                self.askpass = Some(askpass);
+            }
+            Err(e) => {
+                self.error = Some(trf(
+                    "Git kann in diesem Fenster nicht nach Passwörtern fragen: {fehler}",
+                    &[("fehler", &escape(&e.to_string()))],
+                ));
+            }
+        }
+    }
+
+    fn prompt_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(askpass) = &self.askpass {
+            self.prompts.extend(askpass.poll());
+        }
+        if self.prompt.is_none() {
+            self.prompt = self.prompts.pop_front().map(prompt::PromptDialog::new);
+        }
+        let Some(dialog) = self.prompt.as_mut() else {
+            return;
+        };
+        let t = theme::tokens(ctx);
+        if let Some(answer) = dialog.show(ctx, t) {
+            if let Some(askpass) = &self.askpass {
+                askpass.answer(dialog.prompt.id, answer);
+            }
+            self.prompt = None;
         }
     }
 
@@ -891,6 +940,7 @@ impl RepoWindow {
         self.confirm_dialog(&ctx);
         self.branch_dialog(&ctx);
         self.remote_dialog(&ctx);
+        self.prompt_dialog(&ctx);
         self.undo_dialog(&ctx);
         if self.show_discarded {
             let mut open = true;
