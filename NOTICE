@@ -5,4 +5,12 @@ Licensed under MIT OR Apache-2.0.
 Third-party material
 --------------------
 
+crates/ui/src/theme.rs (surfaces and widget-state mapping) and crates/ui/src/i18n.rs, as well as
+xtask, are adapted from StudioCraft (ONEFOLD-LABS/StudioCraft), licensed under MIT OR
+Apache-2.0. StudioCraft's theme in turn follows SoundCraft's theme (storytold/soundcraft,
+crates/ui-egui/src/theme.rs), licensed under MIT OR Apache-2.0.
+
+assets/app-icon and the colours in crates/ui/src/theme.rs come from the ONEFOLD LABS brand
+(ONEFOLD-LABS/brand), licensed under MIT; the ONEFOLD LABS name and mark are not covered.
+
 Licence texts of all Rust dependencies: THIRD-PARTY-LICENSES.txt.

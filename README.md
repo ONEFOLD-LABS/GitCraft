@@ -10,8 +10,17 @@ Git command line. See [`docs/spec.md`](docs/spec.md).
 - Keyboard first, fast on large repositories.
 - Pure Rust with an egui user interface; uses the installed `git`.
 
-> **Status:** just started, nothing to use yet. The first milestone opens a local repository and
-> shows its status.
+> **Status:** first milestone. GitCraft opens a local repository (`gitcraft <path>`, the open
+> dialog, or by dropping a folder on the window) and shows the branch, its upstream and the
+> conflicted, staged, changed and untracked files. Nothing can be changed yet.
+>
+> Known limits: file names in scripts the bundled font lacks (e.g. CJK, Hebrew) show as boxes,
+> and right-to-left names are not laid out correctly yet (the UI toolkit has no bidirectional
+> text support).
+
+```sh
+cargo run --release -p gitcraft -- /path/to/repo
+```
 
 ## Platforms
 

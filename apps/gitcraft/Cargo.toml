@@ -1,0 +1,13 @@
+[package]
+name = "gitcraft"
+description = "GitCraft: Git-Client für den Desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gitcraft-git.workspace = true
+gitcraft-ui.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "links"] }
+egui = "0.37"

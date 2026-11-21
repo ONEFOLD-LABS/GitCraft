@@ -26,7 +26,8 @@ project of ONEFOLD LABS; the rules in this file apply to all ONEFOLD LABS projec
    default font egui embeds. Anything else: stop and ask a maintainer.
 5. **Third-party notices ship with every copy.** `THIRD-PARTY-LICENSES.txt` holds the licence
    texts of all dependencies. After changing dependencies run `cargo xtask licenses` and commit
-   the file; `cargo xtask ci` fails while it is out of date.
+   the file; `cargo xtask ci` fails while it is out of date. Packages include it and the app
+   shows it in its About dialog.
 6. **Report only what ran.** State which commands you ran and what you could not test (other
    operating systems, remotes, credentials, SSH). Never claim a test passed that you did not run.
 7. **No secrets or personal data** in code, commits, logs, test fixtures or requests to external
@@ -61,10 +62,14 @@ GITCRAFT_SHOTS=/some/dir cargo test -p gitcraft-ui   # writes PNGs of the render
 
 ## Git rules
 
+The threat model and the per-PR security checklist are in [docs/security.md](docs/security.md);
+the layers and internal API in [docs/architecture.md](docs/architecture.md).
+
 - Git is the source of truth. GitCraft runs the installed `git` executable through
   `crates/git` (ADR-002); nothing else spawns git.
-- Arguments are passed as a list, never through a shell or string concatenation. Paths from the
-  user or the repository go after `--`.
+- Arguments are passed as a list, never through a shell or string concatenation. Refs, names
+  and URLs from the user or the repository go after `--end-of-options`, paths after `--` or
+  through `--pathspec-from-file=- --pathspec-file-nul`.
 - Every call is non-interactive (`GIT_TERMINAL_PROMPT=0`), uses machine-readable output
   (`--porcelain=v2`, `-z`, explicit formats) and never depends on the user's locale.
 - Repositories are untrusted input. Do not let repository configuration run programs on its own
