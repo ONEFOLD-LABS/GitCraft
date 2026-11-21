@@ -1717,3 +1717,63 @@ fn a_conflicting_stash_apply_is_reported_and_kept() {
     assert_eq!(repo.stashes().unwrap().len(), 1, "kept after a conflict");
     assert_eq!(repo.status().unwrap().conflicts().count(), 1);
 }
+
+fn tags(repo: &Repository) -> Vec<String> {
+    repo.refs()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == gitcraft_git::RefKind::Tag)
+        .map(|r| r.name)
+        .collect()
+}
+
+#[test]
+fn tags_lightweight_annotated_delete_restore() {
+    let (f, repo) = two_commits();
+    let c = Cancel::new();
+    let first = all_commits(&repo)[1].id.clone();
+    repo.create_tag("v0.1", first.as_str(), None, false, &c)
+        .unwrap();
+    repo.create_tag(
+        "v0.2",
+        "HEAD",
+        Some("Zweite Version\n\n#1 erledigt"),
+        false,
+        &c,
+    )
+    .unwrap();
+    assert_eq!(tags(&repo), ["v0.1", "v0.2"]);
+    let out = f
+        .command(&f.repo())
+        .args(["cat-file", "-p", "v0.2"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Zweite Version\n\n#1 erledigt"), "{text}");
+    for bad in ["-x", "a b", "v1..2", ""] {
+        assert!(matches!(
+            repo.create_tag(bad, "HEAD", None, false, &c),
+            Err(GitError::InvalidName { .. })
+        ));
+    }
+    // An existing name is refused by git.
+    assert!(repo.create_tag("v0.1", "HEAD", None, false, &c).is_err());
+
+    let object = repo.delete_tag("v0.2", &c).unwrap();
+    assert_eq!(tags(&repo), ["v0.1"]);
+    repo.restore_tag("v0.2", &object, &c).unwrap();
+    let out = f
+        .command(&f.repo())
+        .args(["cat-file", "-t", "v0.2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "tag",
+        "annotated again"
+    );
+    assert!(
+        repo.restore_tag("v0.2", &object, &c).is_err(),
+        "exists already"
+    );
+}

@@ -274,6 +274,8 @@ pub(crate) enum Action {
     NewBranch(Oid),
     /// "Diesen Commit auschecken …" (detached HEAD)
     Detach(Oid),
+    /// "Tag hier anlegen …"
+    NewTag(Oid),
 }
 
 impl History {
@@ -382,6 +384,10 @@ impl History {
                             ui.separator();
                             if ui.button(tr("Branch hier anlegen …")).clicked() {
                                 actions.push(Action::NewBranch(id.clone()));
+                                ui.close();
+                            }
+                            if ui.button(tr("Tag hier anlegen …")).clicked() {
+                                actions.push(Action::NewTag(id.clone()));
                                 ui.close();
                             }
                             if ui.button(tr("Diesen Commit auschecken …")).clicked() {

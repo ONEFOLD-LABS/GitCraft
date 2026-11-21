@@ -22,6 +22,11 @@ pub(crate) enum Pick {
     },
     Rename(String),
     Delete(String),
+    NewTag {
+        target: String,
+        label: String,
+    },
+    DeleteTag(String),
     /// Show a stash like a commit.
     Stash(Stash),
     ApplyStash {
@@ -184,6 +189,15 @@ fn ref_menu(ui: &mut egui::Ui, r: &Ref) -> Option<Pick> {
             label: r.name.clone(),
             suggested,
         });
+    }
+    if ui.button(tr("Tag hier anlegen …")).clicked() {
+        picked = Some(Pick::NewTag {
+            target: r.full_name.clone(),
+            label: r.name.clone(),
+        });
+    }
+    if r.kind == RefKind::Tag && ui.button(tr("Löschen …")).clicked() {
+        picked = Some(Pick::DeleteTag(r.name.clone()));
     }
     if r.kind == RefKind::Local {
         if ui.button(tr("Umbenennen …")).clicked() {
