@@ -81,9 +81,9 @@ fn main() -> ExitCode {
                 .set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
             i18n::set_language(i18n::Language::System);
             theme::install(&cc.egui_ctx, egui::ThemePreference::System);
-            Ok(Box::new(App {
-                window: RepoWindow::new(GitRunner::new(), initial),
-            }))
+            let mut window = RepoWindow::new(GitRunner::new(), initial);
+            window.use_settings(gitcraft_ui::settings::config_dir());
+            Ok(Box::new(App { window }))
         }),
     );
     match result {

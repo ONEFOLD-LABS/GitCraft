@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use crate::diff::{ChangedFile, FileDiff, parse_name_status, parse_numstat, whole_file_added};
 use crate::log::{FORMAT, LogReader};
 use crate::path::bytes_to_path;
 use crate::refs::{REF_FORMAT, STASH_FORMAT};
-use crate::{GitError, GitRunner, Ref, Stash, Status};
+use crate::{Commit, GitError, GitRunner, Oid, Ref, RepoPath, Stash, Status};
+use std::ffi::OsString;
 
 /// An opened Git working tree.
 #[derive(Debug, Clone)]
@@ -124,10 +126,157 @@ impl Repository {
         Stash::parse_list(&out)
     }
 
+    /// The full message of a commit.
+    pub fn commit_message(&self, commit: &Commit) -> Result<String, GitError> {
+        let out = self.runner.read_with(
+            &self.workdir,
+            &self.read_config,
+            [
+                "show",
+                "-s",
+                "--no-color",
+                "--format=%B",
+                commit.id.as_str(),
+            ],
+        )?;
+        Ok(String::from_utf8_lossy(&out).trim_end().to_owned())
+    }
+
+    /// The files a commit changed, against its first parent (a root commit against nothing).
+    pub fn commit_files(&self, commit: &Commit) -> Result<Vec<ChangedFile>, GitError> {
+        let run = |format: &str| {
+            let mut args = vec![
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-commit-id",
+                "--find-renames",
+                format,
+            ];
+            match commit.parents.first() {
+                Some(parent) => args.push(parent.as_str()),
+                None => args.push("--root"),
+            }
+            args.push(commit.id.as_str());
+            self.runner
+                .read_with(&self.workdir, &self.read_config, args)
+        };
+        let kinds = parse_name_status(&run("--name-status")?);
+        parse_numstat(&run("--numstat")?, &kinds)
+    }
+
+    /// The diff of one file of a commit, against its first parent.
+    pub fn commit_diff(&self, commit: &Commit, file: &ChangedFile) -> Result<FileDiff, GitError> {
+        let mut args: Vec<OsString> = [
+            "--literal-pathspecs",
+            "diff-tree",
+            "-p",
+            "-r",
+            "--no-color",
+            "--no-commit-id",
+            "--find-renames",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        match commit.parents.first() {
+            Some(parent) => args.push(parent.as_str().into()),
+            None => args.push("--root".into()),
+        }
+        args.push(commit.id.as_str().into());
+        args.push("--".into());
+        args.extend(pathspec(file));
+        let out = self
+            .runner
+            .read_with(&self.workdir, &self.read_config, args)?;
+        Ok(FileDiff::parse(&out)?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
+
+    /// The diff of a file in the working tree: index → working tree, or with `staged`
+    /// HEAD → index.
+    pub fn worktree_diff(
+        &self,
+        path: &RepoPath,
+        old_path: Option<&RepoPath>,
+        staged: bool,
+    ) -> Result<FileDiff, GitError> {
+        let mut args: Vec<OsString> = [
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--find-renames",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        if staged {
+            args.push("--cached".into());
+        }
+        args.push("--".into());
+        args.push(path_arg(path));
+        if let Some(old) = old_path {
+            args.push(path_arg(old));
+        }
+        let out = self
+            .runner
+            .read_with(&self.workdir, &self.read_config, args)?;
+        Ok(FileDiff::parse(&out)?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
+
+    /// An untracked file shown as wholly added. Symbolic links are not followed (their target
+    /// is shown); at most [`UNTRACKED_MAX`] bytes are read.
+    pub fn untracked_diff(&self, path: &RepoPath) -> Result<FileDiff, GitError> {
+        let full = path.to_path(&self.workdir);
+        let io = |e: std::io::Error| GitError::Spawn(format!("{}: {e}", path.display()));
+        let meta = std::fs::symlink_metadata(&full).map_err(io)?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&full).map_err(io)?;
+            return Ok(whole_file_added(target.to_string_lossy().as_bytes()));
+        }
+        if !meta.is_file() {
+            return Ok(FileDiff::default());
+        }
+        use std::io::Read;
+        let mut content = Vec::new();
+        std::fs::File::open(&full)
+            .and_then(|f| f.take(UNTRACKED_MAX).read_to_end(&mut content))
+            .map_err(io)?;
+        let mut diff = whole_file_added(&content);
+        diff.truncated |= meta.len() > UNTRACKED_MAX;
+        Ok(diff)
+    }
+
     /// The history of all branches, remote branches and tags (and a detached HEAD) in graph
     /// order, newest first, read in pages from one running `git log`. Empty for a repository
     /// without commits.
     pub fn log(&self) -> Result<LogReader, GitError> {
+        let Some(revisions) = self.revisions()? else {
+            return Ok(LogReader::new(None));
+        };
+        let mut args: Vec<OsString> = [
+            "log",
+            "-z",
+            "--topo-order",
+            "--no-color",
+            "--decorate=no",
+            FORMAT,
+        ]
+        .map(OsString::from)
+        .to_vec();
+        args.extend(revisions);
+        let stream = self.runner.stream(&self.workdir, &self.read_config, args)?;
+        Ok(LogReader::new(Some(stream)))
+    }
+
+    /// The revisions the history shows: all branches, remote branches and tags, and HEAD when
+    /// it points at a commit. `None` for a repository without any commit.
+    fn revisions(&self) -> Result<Option<Vec<OsString>>, GitError> {
         let head = match self.runner.read_with(
             &self.workdir,
             &self.read_config,
@@ -138,25 +287,122 @@ impl Repository {
             Err(e) => return Err(e),
         };
         if !head && self.refs()?.is_empty() {
-            return Ok(LogReader::new(None));
+            return Ok(None);
         }
-        let mut args = vec![
-            "log",
-            "-z",
-            "--topo-order",
-            "--no-color",
-            "--decorate=no",
-            FORMAT,
-            "--branches",
-            "--remotes",
-            "--tags",
-        ];
+        let mut args: Vec<OsString> = ["--branches", "--remotes", "--tags"]
+            .map(OsString::from)
+            .to_vec();
         if head {
-            args.push("HEAD");
+            args.push("HEAD".into());
+        }
+        Ok(Some(args))
+    }
+
+    /// Commits of the history that match `text` (see [`SearchKind`]), streamed as they are
+    /// found. The text is searched literally (no regular expressions) and never becomes an
+    /// option: it is attached to its option (`--grep=…`, `-S…`) or given as a literal pathspec.
+    pub fn search(&self, kind: SearchKind, text: &str) -> Result<SearchStream, GitError> {
+        let Some(revisions) = self.revisions()? else {
+            return Ok(SearchStream { stream: None });
+        };
+        let mut args: Vec<OsString> = vec![
+            "--literal-pathspecs".into(),
+            "log".into(),
+            "-z".into(),
+            "--format=%H".into(),
+            "--no-color".into(),
+        ];
+        match kind {
+            SearchKind::Message => {
+                args.extend(["--regexp-ignore-case".into(), "--fixed-strings".into()]);
+                args.push(format!("--grep={text}").into());
+            }
+            SearchKind::Author => {
+                args.extend(["--regexp-ignore-case".into(), "--fixed-strings".into()]);
+                args.push(format!("--author={text}").into());
+            }
+            SearchKind::Content => args.push(format!("-S{text}").into()),
+            SearchKind::Path => {}
+        }
+        args.extend(revisions);
+        if kind == SearchKind::Path {
+            args.push("--".into());
+            args.push(text.into());
         }
         let stream = self.runner.stream(&self.workdir, &self.read_config, args)?;
-        Ok(LogReader::new(Some(stream)))
+        Ok(SearchStream {
+            stream: Some(stream),
+        })
     }
+}
+
+/// What a history search looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    /// The commit message (case-insensitive).
+    Message,
+    /// Author name or e-mail (case-insensitive).
+    Author,
+    /// Commits that touched a path (a file or everything below a directory).
+    Path,
+    /// Commits that added or removed a string in a file's content (slow on large histories).
+    Content,
+}
+
+/// Commit ids of a running search. Dropping it stops git.
+pub struct SearchStream {
+    stream: Option<crate::GitStream>,
+}
+
+impl SearchStream {
+    /// Up to `n` further matches; fewer at the end (then [`SearchStream::is_done`]).
+    pub fn next_batch(&mut self, n: usize) -> Result<Vec<Oid>, GitError> {
+        let mut batch = Vec::new();
+        while batch.len() < n {
+            let Some(stream) = self.stream.as_mut() else {
+                break;
+            };
+            match stream.next_record(0, 128)? {
+                Some(rec) => {
+                    let text = String::from_utf8_lossy(&rec);
+                    let id = text.trim();
+                    if !id.is_empty() {
+                        batch.push(
+                            Oid::parse(id)
+                                .ok_or_else(|| GitError::Parse(format!("search: {id:?}")))?,
+                        );
+                    }
+                }
+                None => {
+                    if let Some(stream) = self.stream.take() {
+                        stream.finish()?;
+                    }
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.stream.is_none()
+    }
+}
+
+/// Largest untracked file read for display.
+pub const UNTRACKED_MAX: u64 = 4 * 1024 * 1024;
+
+/// A repository path as a command-line argument (after `--`, with `--literal-pathspecs`).
+fn path_arg(path: &RepoPath) -> OsString {
+    crate::path::bytes_to_path(path.as_bytes()).into_os_string()
+}
+
+/// The paths of a changed file: new path, and the old one for a rename.
+fn pathspec(file: &ChangedFile) -> Vec<OsString> {
+    let mut v = vec![path_arg(&file.path)];
+    if let Some(old) = &file.old_path {
+        v.push(path_arg(old));
+    }
+    v
 }
 
 /// Overrides that switch off the content filters (`filter.<driver>.clean`, `.smudge`,
