@@ -121,7 +121,11 @@ fn opening_reads_the_first_snapshot() {
     f.write("a.txt");
     let (session, snapshot) = RepoSession::open(f.runner(), &f.repo(), Arc::new(|| {})).unwrap();
     assert_eq!(snapshot.status.untracked().count(), 1);
-    assert_eq!(session.workdir(), f.repo().canonicalize().unwrap());
+    // Canonical on both sides: on Windows canonicalize adds a `\\?\` prefix, git does not.
+    assert_eq!(
+        session.workdir().canonicalize().unwrap(),
+        f.repo().canonicalize().unwrap()
+    );
     assert!(
         !session.command_log().is_empty(),
         "the open calls are logged"
