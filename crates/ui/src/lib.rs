@@ -33,6 +33,9 @@ use crate::settings::{Loaded, Settings};
 use crate::sidebar::{Pick, Sidebar};
 use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
 
+/// The ONEFOLD LABS donation page, linked from the help window (F1).
+const SPONSOR_URL: &str = "https://ko-fi.com/onefoldlabs";
+
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
@@ -841,6 +844,10 @@ impl RepoWindow {
                             ui.end_row();
                         }
                     });
+                ui.separator();
+                if ui.link(tr("GitCraft unterstützen …")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(SPONSOR_URL));
+                }
             });
         self.show_keys = open;
     }
