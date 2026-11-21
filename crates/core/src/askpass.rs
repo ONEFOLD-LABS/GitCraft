@@ -272,7 +272,9 @@ fn handle(stream: TcpStream, shared: &Shared) -> std::io::Result<()> {
         }
         _ => out.write_all(b"NO\n")?,
     }
-    out.flush()
+    out.flush()?;
+    // End the reply explicitly: a plain close can reach the client as a reset on Windows.
+    out.shutdown(std::net::Shutdown::Write)
 }
 
 /// Sends `prompt` to the window at `addr` with `token`; the answer, or `None` when the user
@@ -291,9 +293,15 @@ pub fn request(addr: &str, token: &str, prompt: &str) -> std::io::Result<Option<
     stream.write_all(&req)?;
     stream.flush()?;
     let mut reply = Vec::new();
-    stream
+    let read = stream
         .take(u64::try_from(MAX_PROMPT).unwrap_or(u64::MAX))
-        .read_to_end(&mut reply)?;
+        .read_to_end(&mut reply);
+    // A reset after the reply arrived (Windows) still delivers it.
+    if let Err(e) = read
+        && reply.is_empty()
+    {
+        return Err(e);
+    }
     let reply = String::from_utf8_lossy(&reply);
     Ok(reply.strip_prefix("OK\n").map(str::to_owned))
 }
