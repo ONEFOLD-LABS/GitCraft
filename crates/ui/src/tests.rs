@@ -336,6 +336,12 @@ fn texts_behind_variables_are_translated() {
         "Nächster / vorheriger Treffer",
         "Commit wählen",
         "Commit-ID kopieren",
+        "Committen (im Commit-Formular)",
+        "Zeilen im Diff wählen und vormerken",
+        "Hunk vormerken",
+        "Hunk zurücknehmen",
+        "Auswahl vormerken ({n})",
+        "Auswahl zurücknehmen ({n})",
         "Diff oder Suche schließen",
         "Zoom",
         "Diese Übersicht",
@@ -914,4 +920,88 @@ fn render_commit_form_light() {
     w.commit.summary =
         "Eine Zusammenfassung, die deutlich länger ist als zweiundsiebzig Zeichen erlaubt".into();
     shot("commit-form-light", ThemePreference::Light, w);
+}
+
+/// Thirty lines; `changes` replaces line n with "n neu".
+fn numbered(changes: &[usize]) -> String {
+    (1..=30)
+        .map(|n| {
+            if changes.contains(&n) {
+                format!("{n} neu\n")
+            } else {
+                format!("{n}\n")
+            }
+        })
+        .collect()
+}
+
+/// A window showing the unstaged diff of a file with three hunks.
+fn three_hunks() -> (Fixture, Harness<'static, RepoWindow>) {
+    let f = Fixture::new();
+    f.write("f.txt", &numbered(&[]));
+    f.commit_all("Anfang");
+    f.write("f.txt", &numbered(&[2, 15, 28]));
+    let mut w = f.window();
+    w.open_diff(
+        DiffKey::Worktree {
+            path: RepoPath::from_bytes(b"f.txt"),
+            old: None,
+            staged: false,
+        },
+        "f.txt".into(),
+    );
+    let mut h = harness(w);
+    settle(&mut h);
+    assert!(h.state().diff.as_ref().unwrap().prepared.is_some());
+    (f, h)
+}
+
+fn index_text(f: &Fixture) -> String {
+    let out = Command::new("git")
+        .current_dir(f.repo())
+        .args(["show", ":f.txt"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_hunk_button_stages_one_hunk() {
+    let (f, mut h) = three_hunks();
+    let buttons = h.get_all_by_label("Hunk vormerken").collect::<Vec<_>>();
+    assert_eq!(buttons.len(), 3);
+    buttons[1].click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(index_text(&f), numbered(&[15]));
+}
+
+/// Arrow keys pick changed lines, Shift extends, Enter stages the selection.
+#[test]
+fn keyboard_selects_and_stages_lines() {
+    let (f, mut h) = three_hunks();
+    // First changed line: "-2"; Shift+Down adds "+2 neu".
+    h.key_press(egui::Key::ArrowDown);
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+    h.run_steps(2);
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("diff-lines-dark.png"))
+            .unwrap();
+    }
+    h.get_by_label("Auswahl vormerken (2)");
+    h.key_press(egui::Key::Enter);
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(index_text(&f), numbered(&[2]));
+}
+
+/// Changed after display: nothing is applied and the user is told.
+#[test]
+fn a_stale_diff_is_not_applied() {
+    let (f, mut h) = three_hunks();
+    f.write("f.txt", &numbered(&[2, 15, 20, 28]));
+    h.get_all_by_label("Hunk vormerken").next().unwrap().click();
+    settle(&mut h);
+    assert!(h.state().error().is_some_and(|e| e.contains("geändert")));
+    assert_eq!(index_text(&f), numbered(&[]));
 }

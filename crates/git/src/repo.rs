@@ -202,6 +202,19 @@ impl Repository {
         old_path: Option<&RepoPath>,
         staged: bool,
     ) -> Result<FileDiff, GitError> {
+        let out = self.worktree_diff_raw(path, old_path, staged)?;
+        Ok(FileDiff::parse(&out)?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
+
+    fn worktree_diff_raw(
+        &self,
+        path: &RepoPath,
+        old_path: Option<&RepoPath>,
+        staged: bool,
+    ) -> Result<Vec<u8>, GitError> {
         let mut args: Vec<OsString> = [
             "--literal-pathspecs",
             "diff",
@@ -220,13 +233,40 @@ impl Repository {
         if let Some(old) = old_path {
             args.push(path_arg(old));
         }
-        let out = self
-            .runner
-            .read_with(&self.workdir, &self.read_config, args)?;
-        Ok(FileDiff::parse(&out)?
+        self.runner
+            .read_with(&self.workdir, &self.read_config, args)
+    }
+
+    /// Stages (or with `staged` unstages) only the given lines of a file's diff: `lines` are
+    /// (hunk, line) positions in `shown`, the diff the user looked at. When the file's diff is
+    /// no longer exactly `shown`, nothing is applied ([`GitError::Stale`]).
+    pub fn stage_lines(
+        &self,
+        path: &RepoPath,
+        old_path: Option<&RepoPath>,
+        staged: bool,
+        shown: &FileDiff,
+        lines: &[(usize, usize)],
+        cancel: &Cancel,
+    ) -> Result<Written, GitError> {
+        let raw = self.worktree_diff_raw(path, old_path, staged)?;
+        let fresh = FileDiff::parse(&raw)?
             .into_iter()
             .next()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if &fresh != shown {
+            return Err(GitError::Stale);
+        }
+        if fresh.binary || fresh.truncated || fresh.submodule {
+            return Err(GitError::InvalidValue(path.display()));
+        }
+        let patch = crate::patch::build(&raw, lines, staged)?;
+        let mut args = vec!["apply", "--cached", "--recount"];
+        if staged {
+            args.push("--reverse");
+        }
+        args.push("-");
+        self.write(args, Some(&patch), cancel)
     }
 
     /// An untracked file shown as wholly added. Symbolic links are not followed (their target
