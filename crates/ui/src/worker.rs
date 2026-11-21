@@ -4,13 +4,56 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use gitcraft_git::{GitError, GitRunner, GitVersion, Repository, Status};
+use gitcraft_git::{
+    ChangedFile, Commit, FileDiff, GitError, GitRunner, GitVersion, Ref, RepoPath, Repository,
+    Stash, Status,
+};
+
+/// What the window shows of a repository besides the history: read together so that status,
+/// refs and stashes always belong to the same moment.
+#[derive(Debug, Clone)]
+pub(crate) struct Snapshot {
+    pub status: Status,
+    pub refs: Vec<Ref>,
+    pub stashes: Vec<Stash>,
+}
+
+impl Snapshot {
+    pub(crate) fn read(repo: &Repository) -> Result<Snapshot, GitError> {
+        Ok(Snapshot {
+            status: repo.status()?,
+            refs: repo.refs()?,
+            stashes: repo.stashes()?,
+        })
+    }
+}
+
+/// Which diff to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiffKey {
+    Commit {
+        commit: Box<Commit>,
+        file: ChangedFile,
+    },
+    Worktree {
+        path: RepoPath,
+        old: Option<RepoPath>,
+        staged: bool,
+    },
+    Untracked {
+        path: RepoPath,
+    },
+}
 
 /// Work for git.
 pub(crate) enum Job {
-    /// Check the installed git, open the repository at the path, read its status.
+    /// Message and changed files of a commit.
+    CommitDetails(Repository, Box<Commit>),
+    /// The diff of one file.
+    Diff(Repository, DiffKey),
+    /// Check the installed git, open the repository at the path, read its snapshot.
     Open(PathBuf),
-    /// Read the status of an opened repository again.
+    /// Read the snapshot of an opened repository again.
     Refresh(Repository),
     /// Read the installed git version.
     Version,
@@ -18,8 +61,16 @@ pub(crate) enum Job {
 
 /// What a job produced.
 pub(crate) enum Outcome {
-    Opened(Box<(Repository, Status)>),
-    Refreshed(Status),
+    CommitDetails {
+        id: gitcraft_git::Oid,
+        result: Result<(String, Vec<ChangedFile>), GitError>,
+    },
+    Diff {
+        key: DiffKey,
+        result: Result<FileDiff, GitError>,
+    },
+    Opened(Box<(Repository, Snapshot)>),
+    Refreshed(Box<Snapshot>),
     Version(GitVersion),
     Failed(GitError),
 }
@@ -67,10 +118,26 @@ fn run(job: Job, runner: &GitRunner) -> Result<Outcome, GitError> {
         Job::Open(path) => {
             runner.version()?;
             let repo = Repository::open(runner, &path)?;
-            let status = repo.status()?;
-            Outcome::Opened(Box::new((repo, status)))
+            let snapshot = Snapshot::read(&repo)?;
+            Outcome::Opened(Box::new((repo, snapshot)))
         }
-        Job::Refresh(repo) => Outcome::Refreshed(repo.status()?),
+        Job::Refresh(repo) => Outcome::Refreshed(Box::new(Snapshot::read(&repo)?)),
         Job::Version => Outcome::Version(runner.version()?),
+        Job::CommitDetails(repo, commit) => Outcome::CommitDetails {
+            id: commit.id.clone(),
+            result: repo
+                .commit_message(&commit)
+                .and_then(|m| Ok((m, repo.commit_files(&commit)?))),
+        },
+        Job::Diff(repo, key) => {
+            let result = match &key {
+                DiffKey::Commit { commit, file } => repo.commit_diff(commit, file),
+                DiffKey::Worktree { path, old, staged } => {
+                    repo.worktree_diff(path, old.as_ref(), *staged)
+                }
+                DiffKey::Untracked { path } => repo.untracked_diff(path),
+            };
+            Outcome::Diff { key, result }
+        }
     })
 }

@@ -49,6 +49,15 @@ pub struct Tokens {
     // messages
     pub error_bg: Color32,
     pub error_text: Color32,
+    // history graph
+    /// Lane colours, assigned in turn to the lines of history (3:1 on the grounds).
+    pub lanes: [Color32; 8],
+    /// Text on a lane-coloured label (4.5:1 on every lane colour).
+    pub on_lane: Color32,
+    // diffs
+    /// Background of added and removed lines (text and dim text stay readable on them).
+    pub diff_added_bg: Color32,
+    pub diff_removed_bg: Color32,
 }
 
 impl Tokens {
@@ -77,6 +86,19 @@ impl Tokens {
         untracked: rgb(0x868686),
         error_bg: rgb(0x47211d),
         error_text: rgb(0xfebfb7),
+        lanes: [
+            rgb(0xef8d68),
+            rgb(0x67b0f9),
+            rgb(0x73c076),
+            rgb(0xb897f0),
+            rgb(0xd5a13c),
+            rgb(0x11c2ca),
+            rgb(0xe488be),
+            rgb(0xb0b246),
+        ],
+        on_lane: rgb(0x111719),
+        diff_added_bg: rgb(0x1a3821),
+        diff_removed_bg: rgb(0x482521),
     };
 
     pub const LIGHT: Tokens = Tokens {
@@ -104,6 +126,19 @@ impl Tokens {
         untracked: rgb(0x6a6a6a),
         error_bg: rgb(0xfee0dc),
         error_text: rgb(0x822c27),
+        lanes: [
+            rgb(0xb6532b),
+            rgb(0x2378c2),
+            rgb(0x2f8437),
+            rgb(0x825eb9),
+            rgb(0x986b00),
+            rgb(0x088187),
+            rgb(0xac4e87),
+            rgb(0x787804),
+        ],
+        on_lane: rgb(0xffffff),
+        diff_added_bg: rgb(0xdcf7e1),
+        diff_removed_bg: rgb(0xfee9e6),
     };
 
     pub const fn of(theme: Theme) -> &'static Tokens {
@@ -213,6 +248,20 @@ mod tests {
                 contrast(t.border_light, t.panel_bg) >= 3.0,
                 "control borders"
             );
+            for bg in [t.diff_added_bg, t.diff_removed_bg] {
+                assert!(contrast(t.text, bg) >= 4.5, "diff text");
+                assert!(contrast(t.text_dim, bg) >= 4.5, "line numbers");
+                assert!(
+                    contrast(t.added, bg) >= 3.0 && contrast(t.deleted, bg) >= 3.0,
+                    "signs"
+                );
+            }
+            for lane in t.lanes {
+                for bg in [t.panel_bg, t.row_alt, t.window_bg] {
+                    assert!(contrast(lane, bg) >= 3.0, "lane {lane:?} on {bg:?}");
+                }
+                assert!(contrast(t.on_lane, lane) >= 4.5, "label text on {lane:?}");
+            }
         }
     }
 
