@@ -18,6 +18,12 @@ Ein Ordner lässt sich auch ins Fenster ziehen.";
 /// Reverse-DNS id: Wayland app id, X11 WM class and desktop file name.
 const APP_ID: &str = "io.github.onefold_labs.gitcraft";
 
+/// Window icon (the app icon, 256 px).
+fn app_icon() -> egui::IconData {
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/gitcraft.png");
+    eframe::icon_data::from_png_bytes(png).unwrap_or_default()
+}
+
 struct App {
     window: RepoWindow,
 }
@@ -61,7 +67,8 @@ fn main() -> ExitCode {
             .with_app_id(APP_ID)
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([480.0, 320.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(app_icon()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -74,9 +81,9 @@ fn main() -> ExitCode {
                 .set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
             i18n::set_language(i18n::Language::System);
             theme::install(&cc.egui_ctx, egui::ThemePreference::System);
-            Ok(Box::new(App {
-                window: RepoWindow::new(GitRunner::new(), initial),
-            }))
+            let mut window = RepoWindow::new(GitRunner::new(), initial);
+            window.use_settings(gitcraft_ui::settings::config_dir());
+            Ok(Box::new(App { window }))
         }),
     );
     match result {
