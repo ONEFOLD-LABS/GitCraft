@@ -291,3 +291,12 @@ Vorgemerkte Änderungen dalassen	Keep staged changes
 Änderungen geparkt. „Pop“ holt sie zurück.	Changes stashed. "Pop" brings them back.
 Änderungen parken (Stash)	Stash changes
 Stash löschen?	Delete stash?
+Neuer Tag	New tag
+Tag löschen?	Delete tag?
+Markiert {start}.	Marks {start}.
+Mit Nachricht (annotierter Tag)	With a message (annotated tag)
+Signieren (wie für Commits eingestellt)	Sign (as set up for commits)
+Die Nachricht fehlt.	The message is missing.
+Löscht den Tag {name} in diesem Repository. Der Commit bleibt erhalten; „Wiederherstellen“ legt den Tag danach wieder an.	Deletes the tag {name} in this repository. The commit remains; "Restore" creates the tag again afterwards.
+Tag hier anlegen …	Create tag here …
+Tag {name} gelöscht.	Tag {name} deleted.

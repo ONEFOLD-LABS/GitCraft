@@ -50,13 +50,31 @@ pub(crate) enum Dialog {
         loss: Option<Loss>,
     },
     /// Explains detached HEAD before checking out a commit.
-    Detach { id: Oid, label: String },
+    Detach {
+        id: Oid,
+        label: String,
+    },
     /// Leaving a detached HEAD: `loss` are the commits only it holds.
-    Leave { target: Target, loss: Option<Loss> },
+    Leave {
+        target: Target,
+        loss: Option<Loss>,
+    },
     /// A switch stopped because it would overwrite these files; `target` is where it went.
     Overwrite {
         files: Vec<String>,
         target: Option<Target>,
+    },
+    CreateTag {
+        target: String,
+        label: String,
+        name: String,
+        annotated: bool,
+        message: String,
+        sign: bool,
+        focus: bool,
+    },
+    DeleteTag {
+        name: String,
     },
     /// Park the changes.
     Stash {
@@ -128,6 +146,8 @@ impl Dialog {
             Dialog::Leave { .. } => "Commits würden unerreichbar",
             Dialog::Overwrite { .. } => "Wechsel nicht möglich",
             Dialog::Stash { .. } => "Änderungen parken (Stash)",
+            Dialog::CreateTag { .. } => "Neuer Tag",
+            Dialog::DeleteTag { .. } => "Tag löschen?",
             Dialog::DropStash { .. } => "Stash löschen?",
         }
     }
@@ -348,6 +368,73 @@ impl Dialog {
                             untracked: *untracked,
                             keep_index: *keep_index,
                         });
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::CreateTag {
+                target,
+                label,
+                name,
+                annotated,
+                message,
+                sign,
+                focus,
+            } => {
+                ui.label(trf("Markiert {start}.", &[("start", &escape(label))]));
+                let l = ui.label(tr("Name"));
+                let field = ui
+                    .add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY))
+                    .labelled_by(l.id);
+                if std::mem::take(focus) {
+                    field.request_focus();
+                }
+                ui.checkbox(annotated, tr("Mit Nachricht (annotierter Tag)"));
+                if *annotated {
+                    let l = ui.label(tr("Nachricht"));
+                    ui.add(
+                        egui::TextEdit::multiline(message)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .labelled_by(l.id);
+                    ui.checkbox(sign, tr("Signieren (wie für Commits eingestellt)"));
+                }
+                let hint =
+                    name_hint(name.trim())
+                        .or((*annotated && message.trim().is_empty())
+                            .then_some("Die Nachricht fehlt."));
+                if let Some(h) = hint {
+                    ui.label(RichText::new(tr(h)).color(t.text_dim));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(hint.is_none(), egui::Button::new(tr("Anlegen")))
+                        .clicked()
+                    {
+                        decision = Decision::Run(Command::CreateTag {
+                            name: name.trim().to_owned(),
+                            target: target.clone(),
+                            message: annotated.then(|| message.trim_end().to_owned()),
+                            sign: *annotated && *sign,
+                        });
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::DeleteTag { name } => {
+                ui.label(trf(
+                    "Löscht den Tag {name} in diesem Repository. Der Commit bleibt erhalten; „Wiederherstellen“ legt den Tag danach wieder an.",
+                    &[("name", &escape(name))],
+                ));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(danger(t, tr("Löschen"))).clicked() {
+                        decision = Decision::Run(Command::DeleteTag(name.clone()));
                     }
                     if ui.button(tr("Abbrechen")).clicked() {
                         decision = Decision::Close;

@@ -21,6 +21,7 @@ mod repo;
 mod runner;
 mod stash;
 mod status;
+mod tag;
 mod trust;
 
 pub use branch::{Loss, LostCommit, NameProblem};

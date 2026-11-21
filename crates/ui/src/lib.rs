@@ -537,6 +537,13 @@ impl RepoWindow {
                     }
                 }
             }
+            (Command::DeleteTag(name), Ok(Outcome::Deleted(object))) => {
+                self.error = None;
+                self.notice = Some((
+                    trf("Tag {name} gelöscht.", &[("name", &escape(&name))]),
+                    Some(Command::RestoreTag { name, object }),
+                ));
+            }
             (Command::DeleteBranch(name), Ok(Outcome::Deleted(tip))) => {
                 self.error = None;
                 self.notice = Some((
@@ -797,6 +804,12 @@ impl RepoWindow {
                             old,
                             focus: true,
                         });
+                    }
+                    Some(Pick::NewTag { target, label }) => {
+                        self.branch_dialog = Some(tag_dialog(target, label));
+                    }
+                    Some(Pick::DeleteTag(name)) => {
+                        self.branch_dialog = Some(branches::Dialog::DeleteTag { name });
                     }
                     Some(Pick::Stash(stash)) => {
                         if let Some(session) = &self.session {
@@ -1655,6 +1668,10 @@ impl RepoWindow {
                 Action::CopyId(id) => ui.ctx().copy_text(id.as_str().to_owned()),
                 Action::CopyMessage(m) => ui.ctx().copy_text(m),
                 Action::NewBranch(id) => self.new_branch_at(id),
+                Action::NewTag(id) => {
+                    let label = self.commit_label(&id);
+                    self.branch_dialog = Some(tag_dialog(id.as_str().to_owned(), label));
+                }
                 Action::Detach(id) => {
                     let label = self.commit_label(&id);
                     self.branch_dialog = Some(branches::Dialog::Detach { id, label });
@@ -2126,6 +2143,19 @@ fn moved_key(key: &DiffKey) -> Option<DiffKey> {
             old: None,
             staged: true,
         }),
+    }
+}
+
+/// The new-tag dialog at a commit or ref.
+fn tag_dialog(target: String, label: String) -> branches::Dialog {
+    branches::Dialog::CreateTag {
+        target,
+        label,
+        name: String::new(),
+        annotated: false,
+        message: String::new(),
+        sign: false,
+        focus: true,
     }
 }
 

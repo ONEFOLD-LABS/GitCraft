@@ -146,6 +146,20 @@ pub enum Command {
         id: Oid,
         message: String,
     },
+    /// Create a tag; with a message annotated, with `sign` signed (`tag [-a|-s -F -]`).
+    CreateTag {
+        name: String,
+        target: String,
+        message: Option<String>,
+        sign: bool,
+    },
+    /// Delete a tag (`tag -d`); the outcome is the object it pointed to.
+    DeleteTag(String),
+    /// Put a deleted tag back (`update-ref refs/tags/<name> <object> ""`).
+    RestoreTag {
+        name: String,
+        object: Oid,
+    },
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -216,6 +230,9 @@ impl Command {
             | Command::StashApply { .. }
             | Command::StashDrop { .. }
             | Command::StashStore { .. }
+            | Command::CreateTag { .. }
+            | Command::DeleteTag(_)
+            | Command::RestoreTag { .. }
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -571,6 +588,17 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         }
         Command::StashStore { id, message } => {
             repo.stash_store(id, message, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::CreateTag {
+            name,
+            target,
+            message,
+            sign,
+        } => Outcome::Written(repo.create_tag(name, target, message.as_deref(), *sign, cancel)?),
+        Command::DeleteTag(name) => Outcome::Deleted(repo.delete_tag(name, cancel)?),
+        Command::RestoreTag { name, object } => {
+            repo.restore_tag(name, object, cancel)?;
             Outcome::Written(Written::default())
         }
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),

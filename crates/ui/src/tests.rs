@@ -349,6 +349,9 @@ fn texts_behind_variables_are_translated() {
         "Wechsel nicht möglich",
         "Änderungen parken (Stash)",
         "Stash löschen?",
+        "Neuer Tag",
+        "Tag löschen?",
+        "Die Nachricht fehlt.",
         "Der Name fehlt.",
         "Ein Name darf nicht mit „-“ beginnen.",
         "Ein Name darf keine Leerzeichen enthalten.",
@@ -1397,4 +1400,47 @@ fn stash_and_switch_from_the_overwrite_dialog() {
     assert_eq!(h.state().error(), None);
     assert_eq!(head_branch(h.state()), "alt");
     assert_eq!(stash_count(h.state()), 1);
+}
+
+fn tag_names(w: &RepoWindow) -> Vec<String> {
+    w.snapshot
+        .as_ref()
+        .unwrap()
+        .refs
+        .iter()
+        .filter(|r| r.kind == gitcraft_git::RefKind::Tag)
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+/// An annotated tag from the history's context menu; deleting it asks and can be undone.
+#[test]
+fn tags_are_created_deleted_and_restored() {
+    let f = two_commit_fixture();
+    let mut h = harness(f.window());
+    let head = h.state().history.commits()[0].id.clone();
+    h.state_mut().branch_dialog = Some(tag_dialog(head.as_str().to_owned(), "Zwei".into()));
+    h.run_steps(2);
+    type_into(&mut h, "Name", "v1.0");
+    h.get_by_label("Mit Nachricht (annotierter Tag)").click();
+    h.run_steps(2);
+    type_into(&mut h, "Nachricht", "Erste Version");
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("tag-dark.png")).unwrap();
+    }
+    h.get_by_label("Anlegen").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(tag_names(h.state()), ["v1.0"]);
+
+    h.state_mut().branch_dialog = Some(branches::Dialog::DeleteTag {
+        name: "v1.0".into(),
+    });
+    h.run_steps(2);
+    h.get_by_label("Löschen").click();
+    settle(&mut h);
+    assert!(tag_names(h.state()).is_empty());
+    h.get_by_label("Wiederherstellen").click();
+    settle(&mut h);
+    assert_eq!(tag_names(h.state()), ["v1.0"]);
 }
