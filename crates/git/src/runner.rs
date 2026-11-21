@@ -1,13 +1,15 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::GitError;
+use crate::command_log::{CommandLog, LogEntry};
 
 /// Oldest git GitCraft supports (porcelain v2 status with all fields used here, `init -b`).
 pub const MIN_VERSION: GitVersion = GitVersion {
@@ -80,13 +82,47 @@ impl fmt::Display for GitVersion {
     }
 }
 
-/// Starts git. Every call gets an argument list (never a shell), runs without a terminal prompt,
-/// in the C locale, without a pager, and with `core.fsmonitor` switched off so that a
+/// Stops a running git call from another thread (the user pressed Cancel). Cloning shares the
+/// flag.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// What a write printed. Hooks and git's own notes go to stderr; the UI shows both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Written {
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Read,
+    Write,
+}
+
+/// Starts git. Every call gets an argument list (never a shell), runs without a terminal prompt
+/// or editor, in the C locale, without a pager, in its own process group (so that cancelling
+/// also ends hooks and helpers it started), and with `core.fsmonitor` switched off so that a
 /// repository's own configuration cannot start a program while GitCraft only reads.
 #[derive(Debug, Clone)]
 pub struct GitRunner {
     program: PathBuf,
     env: Vec<(OsString, OsString)>,
+    log: Option<Arc<CommandLog>>,
 }
 
 impl Default for GitRunner {
@@ -106,12 +142,19 @@ impl GitRunner {
         GitRunner {
             program: program.into(),
             env: Vec::new(),
+            log: None,
         }
     }
 
     /// Sets an environment variable for every call (e.g. `GIT_CONFIG_GLOBAL` in tests).
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Records every call in `log` (the command log the UI shows).
+    pub fn with_log(mut self, log: Arc<CommandLog>) -> Self {
+        self.log = Some(log);
         self
     }
 
@@ -138,37 +181,125 @@ impl GitRunner {
         self.read_with(cwd, &[], args)
     }
 
-    /// Starts git with GitCraft's fixed setup; returns the child and the subcommand's name.
+    /// Like [`GitRunner::read`], with configuration overrides (`key=value`, passed as `-c`)
+    /// placed before the command; [`crate::Repository`] uses them to neutralise programs its
+    /// configuration names.
+    pub fn read_with<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+    ) -> Result<Vec<u8>, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let (child, call) = self.spawn(cwd, config, args, Mode::Read, false)?;
+        collect(child, &call, None, Some(READ_TIMEOUT), None).map(|(out, _)| out)
+    }
+
+    /// Runs a git command that changes the repository. `input` is written to git's stdin (path
+    /// lists, messages, patches: never temporary files). Writes take normal locks, run hooks
+    /// where Git runs them and have no time limit; `cancel` stops git and everything it started.
+    pub fn write<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+        input: Option<&[u8]>,
+        cancel: &Cancel,
+    ) -> Result<Written, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancel.is_cancelled() {
+            return Err(GitError::Cancelled);
+        }
+        let (child, call) = self.spawn(cwd, config, args, Mode::Write, input.is_some())?;
+        let (stdout, stderr) = collect(
+            child,
+            &call,
+            input.map(<[u8]>::to_vec),
+            None,
+            Some(cancel.clone()),
+        )?;
+        Ok(Written {
+            stdout,
+            stderr: String::from_utf8_lossy(&stderr).trim_end().to_owned(),
+        })
+    }
+
+    /// Starts a read whose output is consumed record by record ([`GitStream`]), e.g. a long
+    /// history. No timeout: the consumer sets the pace; dropping the stream stops git.
+    pub fn stream<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+    ) -> Result<GitStream, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let (mut child, call) = self.spawn(cwd, config, args, Mode::Read, false)?;
+        let stdout = child.stdout.take().map(std::io::BufReader::new);
+        let stderr = child
+            .stderr
+            .take()
+            .map(|err| std::thread::spawn(move || drain(err)));
+        Ok(GitStream {
+            child,
+            reaped: false,
+            stdout,
+            stderr,
+            call,
+        })
+    }
+
+    /// Starts git with GitCraft's fixed setup.
     fn spawn<I, S>(
         &self,
         cwd: &Path,
         config: &[String],
         args: I,
-    ) -> Result<(Child, String), GitError>
+        mode: Mode,
+        stdin: bool,
+    ) -> Result<(Child, Call), GitError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
         let command = args
-            .first()
-            .map(|a| a.to_string_lossy().into_owned())
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .find(|a| !a.starts_with('-'))
+            .map(|a| a.into_owned())
             .unwrap_or_default();
         let mut cmd = Command::new(&self.program);
-        cmd.current_dir(cwd).args(["-c", "core.fsmonitor=false"]);
+        let mut fixed = vec!["-c".to_owned(), "core.fsmonitor=false".to_owned()];
         for c in config {
-            cmd.arg("-c").arg(c);
+            fixed.push("-c".to_owned());
+            fixed.push(c.clone());
         }
-        cmd.args(&args)
-            .stdin(Stdio::null())
+        cmd.current_dir(cwd)
+            .args(&fixed)
+            .args(&args)
+            .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_OPTIONAL_LOCKS", "0")
+            // ":" is git's own "no editor": a command never waits for one.
+            .env("GIT_EDITOR", ":")
+            .env("GIT_SEQUENCE_EDITOR", ":")
             .env("GIT_PAGER", "cat")
             .env("PAGER", "cat")
             .env("LC_ALL", "C")
             .env("LANGUAGE", "C");
+        if mode == Mode::Read {
+            cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        }
         for key in REDIRECTING_ENV {
             cmd.env_remove(key);
         }
@@ -184,6 +315,11 @@ impl GitRunner {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -194,101 +330,190 @@ impl GitRunner {
             std::io::ErrorKind::NotFound => GitError::NotInstalled,
             _ => GitError::Spawn(e.to_string()),
         })?;
-        Ok((child, command))
-    }
-
-    /// Like [`GitRunner::read`], with configuration overrides (`key=value`, passed as `-c`)
-    /// placed before the command; [`crate::Repository`] uses them to neutralise programs its
-    /// configuration names.
-    pub fn read_with<I, S>(
-        &self,
-        cwd: &Path,
-        config: &[String],
-        args: I,
-    ) -> Result<Vec<u8>, GitError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let (child, command) = self.spawn(cwd, config, args)?;
-        collect(child, &command, cwd, READ_TIMEOUT)
-    }
-
-    /// Starts a read whose output is consumed record by record ([`GitStream`]), e.g. a long
-    /// history. No timeout: the consumer sets the pace; dropping the stream stops git.
-    pub fn stream<I, S>(
-        &self,
-        cwd: &Path,
-        config: &[String],
-        args: I,
-    ) -> Result<GitStream, GitError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let (mut child, command) = self.spawn(cwd, config, args)?;
-        let stdout = child.stdout.take().map(std::io::BufReader::new);
-        let stderr = child
-            .stderr
-            .take()
-            .map(|err| std::thread::spawn(move || drain(err)));
-        Ok(GitStream {
+        let shown = fixed
+            .into_iter()
+            .chain(args.iter().map(|a| a.to_string_lossy().into_owned()))
+            .collect();
+        Ok((
             child,
-            stdout,
-            stderr,
-            command,
-            cwd: cwd.to_path_buf(),
-        })
+            Call {
+                command,
+                shown,
+                cwd: cwd.to_path_buf(),
+                write: mode == Mode::Write,
+                started: Instant::now(),
+                time: SystemTime::now(),
+                log: self.log.clone(),
+            },
+        ))
     }
 }
 
-/// Reads stdout (capped) and stderr (capped, on its own thread so neither pipe can block git),
-/// waits for git and maps failures.
+/// One started git call, for errors and the command log.
+struct Call {
+    /// The subcommand, e.g. `status`.
+    command: String,
+    /// All arguments after `git`.
+    shown: Vec<String>,
+    cwd: PathBuf,
+    write: bool,
+    started: Instant,
+    time: SystemTime,
+    log: Option<Arc<CommandLog>>,
+}
+
+impl Call {
+    fn record(&self, code: Option<i32>, stderr: &[u8]) {
+        if let Some(log) = &self.log {
+            log.record(LogEntry::new(
+                self.time,
+                self.cwd.clone(),
+                &self.shown,
+                self.started.elapsed(),
+                code,
+                stderr,
+                self.write,
+            ));
+        }
+    }
+}
+
+/// Why the watchdog ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Ended,
+    TimedOut,
+    Cancelled,
+}
+
+/// A child process and whether it has been waited for (then its id may belong to another
+/// process and must not be signalled).
+struct Watched {
+    child: Child,
+    reaped: bool,
+}
+
+impl Watched {
+    fn kill(&mut self) {
+        if !self.reaped {
+            kill(&mut self.child);
+        }
+    }
+}
+
+/// Stops git and, on Unix, its whole process group (hooks, ssh, helpers). Only for a child that
+/// has not been waited for.
+fn kill(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = i32::try_from(child.id())
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            // The group's id is git's pid (`process_group(0)` at spawn).
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Feeds `input` to stdin (on its own thread), reads stdout (capped) and stderr (capped, on its
+/// own thread so that no pipe can block git), waits for git, records the call and maps
+/// failures. A watchdog stops git after `timeout` or when `cancel` is set.
 fn collect(
     mut child: Child,
-    command: &str,
-    cwd: &Path,
-    timeout: Duration,
-) -> Result<Vec<u8>, GitError> {
+    call: &Call,
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    cancel: Option<Cancel>,
+) -> Result<(Vec<u8>, Vec<u8>), GitError> {
+    let feeder = match (child.stdin.take(), input) {
+        (Some(mut pipe), Some(bytes)) => Some(std::thread::spawn(move || {
+            // git may exit without reading everything (an error); the broken pipe is fine.
+            let _ = pipe.write_all(&bytes);
+        })),
+        _ => None,
+    };
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    // Watchdog: kills git when it takes longer than `timeout`; the main thread then sees the
-    // pipes close and reports the timeout.
-    let child = Arc::new(Mutex::new(child));
+    let child = Arc::new(Mutex::new(Watched {
+        child,
+        reaped: false,
+    }));
     let (done, wait) = mpsc::channel::<()>();
     let watched = Arc::clone(&child);
     let watchdog = std::thread::spawn(move || {
-        if let Err(mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(timeout) {
-            if let Ok(mut c) = watched.lock() {
-                let _ = c.kill();
+        let start = Instant::now();
+        loop {
+            if !matches!(
+                wait.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                return Stop::Ended;
             }
-            return true;
+            let stop = if cancel.as_ref().is_some_and(Cancel::is_cancelled) {
+                Stop::Cancelled
+            } else if timeout.is_some_and(|t| start.elapsed() >= t) {
+                Stop::TimedOut
+            } else {
+                continue;
+            };
+            // The main thread then sees the pipes close.
+            if let Ok(mut c) = watched.lock() {
+                c.kill();
+            }
+            return stop;
         }
-        false
     });
-    let result = collect_pipes(&child, stdout_pipe, stderr_pipe, command, cwd);
+    let result = collect_pipes(&child, stdout_pipe, stderr_pipe);
     let _ = done.send(());
-    let timed_out = watchdog.join().unwrap_or(false);
-    if timed_out {
-        return Err(GitError::TimedOut {
-            command: command.to_owned(),
-            seconds: timeout.as_secs(),
+    let stop = watchdog.join().unwrap_or(Stop::Ended);
+    if let Some(f) = feeder {
+        let _ = f.join();
+    }
+    let out = result?;
+    let code = if stop == Stop::Ended { out.code } else { None };
+    call.record(code, &out.stderr);
+    match stop {
+        Stop::TimedOut => {
+            return Err(GitError::TimedOut {
+                command: call.command.clone(),
+                seconds: timeout.map(|t| t.as_secs()).unwrap_or_default(),
+            });
+        }
+        Stop::Cancelled => return Err(GitError::Cancelled),
+        Stop::Ended => {}
+    }
+    if out.too_large {
+        return Err(GitError::OutputTooLarge {
+            command: call.command.clone(),
+            limit: MAX_STDOUT,
         });
     }
-    result
+    if out.success {
+        return Ok((out.stdout, out.stderr));
+    }
+    Err(failure(out.code, &out.stderr, &call.command, &call.cwd))
+}
+
+struct Collected {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    code: Option<i32>,
+    success: bool,
+    too_large: bool,
 }
 
 fn collect_pipes(
-    child: &Mutex<Child>,
+    child: &Mutex<Watched>,
     stdout_pipe: Option<std::process::ChildStdout>,
     stderr_pipe: Option<std::process::ChildStderr>,
-    command: &str,
-    cwd: &Path,
-) -> Result<Vec<u8>, GitError> {
+) -> Result<Collected, GitError> {
     let kill = || {
         if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-            let _ = c.wait();
+            c.kill();
+            let _ = c.child.wait();
+            c.reaped = true;
         }
     };
     let stderr_reader = stderr_pipe.map(|err| std::thread::spawn(move || drain(err)));
@@ -310,29 +535,30 @@ fn collect_pipes(
     // Poll instead of `wait()`, so the watchdog can take the lock and kill a git that closed its
     // output but does not end.
     let status = loop {
-        let polled = child
+        let mut c = child
             .lock()
-            .map_err(|_| GitError::Spawn("git process lock poisoned".into()))?
+            .map_err(|_| GitError::Spawn("git process lock poisoned".into()))?;
+        let polled = c
+            .child
             .try_wait()
             .map_err(|e| GitError::Spawn(e.to_string()))?;
         if let Some(s) = polled {
+            c.reaped = true;
             break s;
         }
+        drop(c);
         std::thread::sleep(Duration::from_millis(5));
     };
     let stderr = stderr_reader
         .and_then(|h| h.join().ok())
         .unwrap_or_default();
-    if too_large {
-        return Err(GitError::OutputTooLarge {
-            command: command.to_owned(),
-            limit: MAX_STDOUT,
-        });
-    }
-    if status.success() {
-        return Ok(stdout);
-    }
-    Err(failure(status.code(), &stderr, command, cwd))
+    Ok(Collected {
+        stdout,
+        stderr,
+        code: status.code(),
+        success: status.success(),
+        too_large,
+    })
 }
 
 /// Reads a pipe to its end, keeping at most [`MAX_STDERR`] bytes (reading on past the cap, so
@@ -369,10 +595,10 @@ fn failure(code: Option<i32>, stderr: &[u8], command: &str, cwd: &Path) -> GitEr
 /// A running git whose stdout is read record by record. Dropping it stops git.
 pub struct GitStream {
     child: Child,
+    reaped: bool,
     stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
     stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
-    command: String,
-    cwd: PathBuf,
+    call: Call,
 }
 
 impl GitStream {
@@ -397,9 +623,9 @@ impl GitStream {
         if record.last() == Some(&separator) {
             record.pop();
         } else if record.len() > max {
-            let _ = self.child.kill();
+            kill(&mut self.child);
             return Err(GitError::OutputTooLarge {
-                command: self.command.clone(),
+                command: self.call.command.clone(),
                 limit: max,
             });
         }
@@ -413,24 +639,35 @@ impl GitStream {
             .child
             .wait()
             .map_err(|e| GitError::Spawn(e.to_string()))?;
+        self.reaped = true;
         let stderr = self
             .stderr
             .take()
             .and_then(|h| h.join().ok())
             .unwrap_or_default();
+        self.call.record(status.code(), &stderr);
         if status.success() {
             Ok(())
         } else {
-            Err(failure(status.code(), &stderr, &self.command, &self.cwd))
+            Err(failure(
+                status.code(),
+                &stderr,
+                &self.call.command,
+                &self.call.cwd,
+            ))
         }
     }
 }
 
 impl Drop for GitStream {
     fn drop(&mut self) {
-        // Unread output: git is no longer needed. After `finish` this is a no-op.
-        let _ = self.child.kill();
+        if self.reaped {
+            return;
+        }
+        // Unread output: git is no longer needed.
+        kill(&mut self.child);
         let _ = self.child.wait();
+        self.call.record(None, b"");
     }
 }
 
@@ -475,8 +712,53 @@ mod tests {
             .spawn()
             .unwrap();
         let start = std::time::Instant::now();
-        let r = collect(child, "sleep", Path::new("."), Duration::from_millis(200));
+        let r = collect(
+            child,
+            &Call::bare("sleep"),
+            None,
+            Some(Duration::from_millis(200)),
+            None,
+        );
         assert!(matches!(r, Err(GitError::TimedOut { .. })), "{r:?}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    impl Call {
+        fn bare(command: &str) -> Call {
+            Call {
+                command: command.to_owned(),
+                shown: Vec::new(),
+                cwd: PathBuf::from("."),
+                write: false,
+                started: Instant::now(),
+                time: SystemTime::now(),
+                log: None,
+            }
+        }
+    }
+
+    /// Cancelling ends the process and everything it started: the background `sleep` holds
+    /// the output pipe open, so without the group kill this would wait 30 s.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_stops_the_whole_process_group() {
+        use std::os::unix::process::CommandExt;
+        let child = Command::new("sh")
+            .args(["-c", "sleep 30 & sleep 30; wait"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let cancel = Cancel::new();
+        let later = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            later.cancel();
+        });
+        let start = std::time::Instant::now();
+        let r = collect(child, &Call::bare("sh"), None, None, Some(cancel));
+        assert_eq!(r, Err(GitError::Cancelled));
         assert!(start.elapsed() < Duration::from_secs(10));
     }
 

@@ -4,7 +4,7 @@ use crate::diff::{ChangedFile, FileDiff, parse_name_status, parse_numstat, whole
 use crate::log::{FORMAT, LogReader};
 use crate::path::bytes_to_path;
 use crate::refs::{REF_FORMAT, STASH_FORMAT};
-use crate::{Commit, GitError, GitRunner, Oid, Ref, RepoPath, Stash, Status};
+use crate::{Cancel, Commit, GitError, GitRunner, Oid, Ref, RepoPath, Stash, Status, Written};
 use std::ffi::OsString;
 
 /// An opened Git working tree.
@@ -386,6 +386,156 @@ impl SearchStream {
     pub fn is_done(&self) -> bool {
         self.stream.is_none()
     }
+}
+
+impl Repository {
+    /// Stages the given paths as they are in the working tree: changes, new files and
+    /// deletions (`git add --all` limited to the paths). Nothing for an empty list.
+    pub fn stage(&self, paths: &[RepoPath], cancel: &Cancel) -> Result<Written, GitError> {
+        if paths.is_empty() {
+            return Ok(Written::default());
+        }
+        self.write_paths(&["add", "--all"], paths, cancel)
+    }
+
+    /// Stages every change in the working tree, untracked files included.
+    pub fn stage_all(&self, cancel: &Cancel) -> Result<Written, GitError> {
+        self.write(["add", "--all"], None, cancel)
+    }
+
+    /// Takes the given paths out of the index again (back to `HEAD`, or untracked on an unborn
+    /// branch); the working tree is not touched. For a staged rename pass both paths.
+    pub fn unstage(&self, paths: &[RepoPath], cancel: &Cancel) -> Result<Written, GitError> {
+        if paths.is_empty() {
+            return Ok(Written::default());
+        }
+        if self.has_head()? {
+            self.write_paths(&["restore", "--staged"], paths, cancel)
+        } else {
+            self.write_paths(&["rm", "--cached", "-r", "--quiet"], paths, cancel)
+        }
+    }
+
+    /// Takes everything out of the index (working tree untouched).
+    pub fn unstage_all(&self, cancel: &Cancel) -> Result<Written, GitError> {
+        if self.has_head()? {
+            self.write(["reset", "--quiet"], None, cancel)
+        } else {
+            self.write(
+                [
+                    "rm",
+                    "--cached",
+                    "-r",
+                    "--quiet",
+                    "--ignore-unmatch",
+                    "--",
+                    ".",
+                ],
+                None,
+                cancel,
+            )
+        }
+    }
+
+    /// Whether `HEAD` points at a commit (false on an unborn branch).
+    fn has_head(&self) -> Result<bool, GitError> {
+        match self.runner.read_with(
+            &self.workdir,
+            &self.read_config,
+            ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        ) {
+            Ok(_) => Ok(true),
+            Err(GitError::Failed { code: Some(1), .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A write in the working tree (no configuration overrides: the repository is trusted
+    /// before core lets a write run, ADR-006 and docs/security.md T1).
+    fn write<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        cancel: &Cancel,
+    ) -> Result<Written, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.runner.write(&self.workdir, &[], args, input, cancel)
+    }
+
+    /// A write whose paths come on stdin, NUL-separated, as literal pathspecs: no path can
+    /// become an option or pathspec magic, and no command line grows too long.
+    fn write_paths(
+        &self,
+        command: &[&str],
+        paths: &[RepoPath],
+        cancel: &Cancel,
+    ) -> Result<Written, GitError> {
+        let mut args = vec!["--literal-pathspecs"];
+        args.extend_from_slice(command);
+        args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
+        self.write(args, Some(&pathspec_input(paths)), cancel)
+    }
+
+    /// Checks a new branch name: git's rules (`git check-ref-format`), and never an option.
+    /// The error says why a name is refused.
+    pub fn check_branch_name(&self, name: &str) -> Result<(), NameError> {
+        check_name_shape(name)?;
+        let full = format!("refs/heads/{name}");
+        match self
+            .runner
+            .read(&self.workdir, ["check-ref-format", full.as_str()])
+        {
+            Ok(_) => Ok(()),
+            Err(GitError::Failed { code: Some(1), .. }) => Err(NameError::Rules),
+            Err(e) => Err(NameError::Git(e)),
+        }
+    }
+}
+
+/// Why a branch or tag name is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    Empty,
+    /// Starts with `-` (would read as an option).
+    LeadingDash,
+    /// Contains whitespace or control characters.
+    Whitespace,
+    /// Breaks one of git's rules for ref names (`..`, `~`, `^`, `:`, `?`, `*`, `[`, `\`, `@{`,
+    /// a trailing `.lock` or `/`, …).
+    Rules,
+    /// git could not check the name.
+    Git(GitError),
+}
+
+/// The checks GitCraft makes before git sees a name.
+fn check_name_shape(name: &str) -> Result<(), NameError> {
+    if name.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if name.starts_with('-') {
+        return Err(NameError::LeadingDash);
+    }
+    if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(NameError::Whitespace);
+    }
+    // Valid as ref names, but they would read as the current commit.
+    if name == "HEAD" || name == "@" {
+        return Err(NameError::Rules);
+    }
+    Ok(())
+}
+
+/// Paths as git's `--pathspec-file-nul` input: each path followed by NUL, bytes unchanged.
+fn pathspec_input(paths: &[RepoPath]) -> Vec<u8> {
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    input
 }
 
 /// Largest untracked file read for display.

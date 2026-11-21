@@ -63,8 +63,12 @@ GITCRAFT_SHOTS=/some/dir cargo test -p gitcraft-ui   # writes PNGs of the render
 
 - Git is the source of truth. GitCraft runs the installed `git` executable through
   `crates/git` (ADR-002); nothing else spawns git.
+- Every write goes through `crates/core` (`RepoSession::submit` with a `Command`): writes run one
+  at a time per repository, each followed by a refresh, and can be cancelled. The UI never calls
+  `Repository` write functions itself.
 - Arguments are passed as a list, never through a shell or string concatenation. Paths from the
-  user or the repository go after `--`.
+  user or the repository go on stdin (`--pathspec-from-file=- --pathspec-file-nul`) or after `--`,
+  always with `--literal-pathspecs`; refs and URLs after `--end-of-options`.
 - Every call is non-interactive (`GIT_TERMINAL_PROMPT=0`), uses machine-readable output
   (`--porcelain=v2`, `-z`, explicit formats) and never depends on the user's locale.
 - Repositories are untrusted input. Do not let repository configuration run programs on its own

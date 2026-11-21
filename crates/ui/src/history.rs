@@ -8,7 +8,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::epaint::CubicBezierShape;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2};
-use gitcraft_git::{Commit, GitError, Oid, Ref, RefKind, Repository, escape};
+use gitcraft_core::Reader;
+use gitcraft_git::{Commit, GitError, Oid, Ref, RefKind, escape};
 use gitcraft_graph::{Graph, Row as GraphRow};
 
 use crate::i18n::{tr, trf};
@@ -39,7 +40,7 @@ struct Loader {
 }
 
 impl Loader {
-    fn start(repo: Repository, ctx: egui::Context) -> Result<Loader, String> {
+    fn start(repo: Reader, ctx: egui::Context) -> Result<Loader, String> {
         let (want, want_rx) = channel::<usize>();
         let (tx, pages) = channel();
         std::thread::Builder::new()
@@ -103,7 +104,7 @@ impl History {
     }
 
     /// Starts reading the history of `repo` in the background.
-    pub(crate) fn start(repo: &Repository, ctx: &egui::Context) -> History {
+    pub(crate) fn start(repo: &Reader, ctx: &egui::Context) -> History {
         let mut h = History::empty();
         match Loader::start(repo.clone(), ctx.clone()) {
             Ok(loader) => {

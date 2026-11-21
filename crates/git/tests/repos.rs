@@ -4,8 +4,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
-use gitcraft_git::{Change, Conflict, GitError, GitRunner, Head, Repository, State, Status};
+use gitcraft_git::{
+    Cancel, Change, CommandLog, Conflict, GitError, GitRunner, Head, NameError, RepoPath,
+    Repository, State, Status,
+};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -773,4 +777,164 @@ fn search_in_an_empty_repository_finds_nothing() {
         .unwrap();
     assert!(s.next_batch(10).unwrap().is_empty());
     assert!(s.is_done());
+}
+
+fn paths(names: &[&str]) -> Vec<RepoPath> {
+    names
+        .iter()
+        .map(|n| RepoPath::from_bytes(n.as_bytes()))
+        .collect()
+}
+
+fn staged_names(s: &Status) -> Vec<String> {
+    s.staged().map(|(f, _)| f.path.display()).collect()
+}
+
+#[test]
+fn stage_and_unstage_paths() {
+    let f = Fixture::new();
+    f.write("a.txt", "1\n");
+    f.write("b.txt", "1\n");
+    f.write("gone.txt", "1\n");
+    f.commit_all("first");
+    f.write("a.txt", "2\n");
+    f.write("b.txt", "2\n");
+    f.write("new.txt", "n\n");
+    fs::remove_file(f.repo().join("gone.txt")).unwrap();
+    let repo = f.open();
+    let c = Cancel::new();
+
+    repo.stage(&paths(&["a.txt", "new.txt", "gone.txt"]), &c)
+        .unwrap();
+    let s = repo.status().unwrap();
+    assert_eq!(staged_names(&s), ["a.txt", "gone.txt", "new.txt"]);
+    assert!(s.unstaged().any(|(x, _)| x.path.display() == "b.txt"));
+
+    repo.unstage(&paths(&["a.txt", "gone.txt"]), &c).unwrap();
+    assert_eq!(staged_names(&repo.status().unwrap()), ["new.txt"]);
+    assert_eq!(fs::read_to_string(f.repo().join("a.txt")).unwrap(), "2\n");
+
+    repo.stage_all(&c).unwrap();
+    assert_eq!(
+        staged_names(&repo.status().unwrap()),
+        ["a.txt", "b.txt", "gone.txt", "new.txt"]
+    );
+    repo.unstage_all(&c).unwrap();
+    assert!(staged_names(&repo.status().unwrap()).is_empty());
+    // An empty list changes nothing (git add --all without paths would stage everything).
+    repo.stage(&[], &c).unwrap();
+    assert!(staged_names(&repo.status().unwrap()).is_empty());
+}
+
+#[test]
+fn unstage_on_an_unborn_branch() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.write("b.txt", "1");
+    let repo = f.open();
+    let c = Cancel::new();
+    repo.stage_all(&c).unwrap();
+    repo.unstage(&paths(&["a.txt"]), &c).unwrap();
+    assert_eq!(staged_names(&repo.status().unwrap()), ["b.txt"]);
+    repo.unstage_all(&c).unwrap();
+    assert!(staged_names(&repo.status().unwrap()).is_empty());
+    assert!(f.repo().join("a.txt").exists() && f.repo().join("b.txt").exists());
+}
+
+/// File names that look like options or pathspec magic are staged as the files they name and
+/// nothing else (docs/security.md T2).
+#[cfg(unix)]
+#[test]
+fn hostile_file_names_stay_file_names() {
+    let f = Fixture::new();
+    let hostile = [
+        "--upload-pack=touch x",
+        "-rf",
+        ":(glob)*",
+        "*",
+        "a b",
+        "new\nline",
+        ":!a b",
+    ];
+    for n in hostile {
+        f.write(n, "x");
+    }
+    f.write("bystander.txt", "x");
+    let repo = f.open();
+    let c = Cancel::new();
+    for n in hostile {
+        repo.stage(&paths(&[n]), &c).unwrap();
+        let staged = staged_names(&repo.status().unwrap());
+        assert!(
+            staged.contains(&RepoPath::from_bytes(n.as_bytes()).display()),
+            "{n:?} staged: {staged:?}"
+        );
+        assert!(
+            !staged.contains(&"bystander.txt".to_owned()),
+            "{n:?} staged more"
+        );
+        repo.unstage(&paths(&[n]), &c).unwrap();
+        assert!(staged_names(&repo.status().unwrap()).is_empty(), "{n:?}");
+    }
+    assert!(!f.repo().join("x").exists(), "no program ran");
+}
+
+#[test]
+fn branch_names_are_checked() {
+    let f = Fixture::new();
+    let repo = f.open();
+    assert_eq!(repo.check_branch_name("feature/x-1"), Ok(()));
+    assert_eq!(repo.check_branch_name(""), Err(NameError::Empty));
+    assert_eq!(
+        repo.check_branch_name("--upload-pack=touch x"),
+        Err(NameError::LeadingDash)
+    );
+    assert_eq!(repo.check_branch_name("-rf"), Err(NameError::LeadingDash));
+    assert_eq!(repo.check_branch_name("a b"), Err(NameError::Whitespace));
+    assert_eq!(repo.check_branch_name("a\nb"), Err(NameError::Whitespace));
+    for bad in [
+        "a..b", "a~1", "x^", "c:d", "q?", "s*", "[x", "w\\x", "a@{1}", "x.lock", "x/", "/x", "@",
+        "HEAD",
+    ] {
+        assert_eq!(
+            repo.check_branch_name(bad),
+            Err(NameError::Rules),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn every_call_is_logged_with_its_arguments() {
+    let f = Fixture::new();
+    f.write("a b.txt", "1");
+    let log = Arc::new(CommandLog::new());
+    let repo = Repository::open(&f.runner().with_log(Arc::clone(&log)), &f.repo()).unwrap();
+    repo.status().unwrap();
+    repo.stage(&paths(&["a b.txt"]), &Cancel::new()).unwrap();
+    let entries = log.entries();
+    let status = entries
+        .iter()
+        .find(|e| e.args.iter().any(|a| a == "status"))
+        .unwrap();
+    assert!(!status.write && status.code == Some(0));
+    assert_eq!(status.args[..2], ["-c", "core.fsmonitor=false"]);
+    let add = entries.last().unwrap();
+    assert!(add.write);
+    assert_eq!(
+        add.posix_line(),
+        "git -c core.fsmonitor=false --literal-pathspecs add --all --pathspec-from-file=- --pathspec-file-nul"
+    );
+    assert_eq!(add.cwd, repo.workdir());
+}
+
+#[test]
+fn a_cancelled_write_does_not_start() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    let repo = f.open();
+    let c = Cancel::new();
+    c.cancel();
+    assert_eq!(repo.stage_all(&c), Err(GitError::Cancelled));
+    assert!(staged_names(&repo.status().unwrap()).is_empty());
 }

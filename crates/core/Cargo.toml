@@ -1,0 +1,13 @@
+[package]
+name = "gitcraft-core"
+description = "Anwendungsschicht: Sitzung je Repository, Befehle, Reihenfolge der Schreibvorgänge, Ereignisse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gitcraft-git.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
