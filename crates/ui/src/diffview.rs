@@ -25,6 +25,16 @@ enum Row {
     NoNewline,
 }
 
+/// What the user asked for in the diff's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffAction {
+    None,
+    /// Back to the history.
+    Back,
+    /// The header's action button (stage or unstage the file).
+    Act,
+}
+
 /// A diff ready to draw.
 pub(crate) struct Prepared {
     pub title: String,
@@ -95,14 +105,28 @@ impl Prepared {
         }
     }
 
-    /// Draws the diff; returns true when the user asks to go back to the history.
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, t: &Tokens) -> bool {
-        let mut back = false;
+    /// Draws the diff with an optional action button in its header (`action` is its German
+    /// label).
+    pub(crate) fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Tokens,
+        action: Option<&'static str>,
+    ) -> DiffAction {
+        let mut back = DiffAction::None;
         ui.horizontal(|ui| {
-            back = ui
+            if ui
                 .button(tr("Zurück zum Graphen"))
                 .on_hover_text(tr("Esc"))
-                .clicked();
+                .clicked()
+            {
+                back = DiffAction::Back;
+            }
+            if let Some(label) = action
+                && ui.button(tr(label)).clicked()
+            {
+                back = DiffAction::Act;
+            }
             ui.label(RichText::new(&self.title).color(t.text_strong).size(15.0));
             ui.label(RichText::new(format!("+{}", self.added)).color(t.added));
             ui.label(RichText::new(format!("-{}", self.removed)).color(t.deleted));
