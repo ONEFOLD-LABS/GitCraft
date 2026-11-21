@@ -17,6 +17,7 @@ mod refs;
 mod repo;
 mod runner;
 mod status;
+mod trust;
 
 pub use command_log::{CommandLog, LogEntry, redact};
 pub use diff::{ChangedFile, FileDiff, FileStatus, Hunk, Line, LineKind, MAX_LINES};
@@ -28,3 +29,4 @@ pub use refs::{Ref, RefKind, Stash, Tracking};
 pub use repo::{NameError, Repository, SearchKind, SearchStream, UNTRACKED_MAX};
 pub use runner::{Cancel, GitRunner, GitStream, GitVersion, MIN_VERSION, Written};
 pub use status::{Change, Conflict, FileChange, Head, Oid, State, Status, Upstream};
+pub use trust::{ProgramSetting, TrustReport};

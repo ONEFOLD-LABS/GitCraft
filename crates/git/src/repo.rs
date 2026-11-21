@@ -437,6 +437,16 @@ impl Repository {
         }
     }
 
+    /// A read in the working tree with the read overrides.
+    pub(crate) fn read<I, S>(&self, args: I) -> Result<Vec<u8>, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.runner
+            .read_with(&self.workdir, &self.read_config, args)
+    }
+
     /// Whether `HEAD` points at a commit (false on an unborn branch).
     fn has_head(&self) -> Result<bool, GitError> {
         match self.runner.read_with(

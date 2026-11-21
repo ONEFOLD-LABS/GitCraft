@@ -237,6 +237,7 @@ fn reads_of_different_kinds_do_not_supersede_each_other() {
         cancels: Mutex::new(HashMap::new()),
         events: channel().0,
         wake: Arc::new(|| {}),
+        trusted: AtomicBool::new(true),
     };
     let r = shared.begin(&Command::Refresh);
     let d = shared.begin(&Command::Diff(DiffKey::Untracked {
@@ -260,4 +261,37 @@ fn every_call_is_in_the_command_log() {
     assert_eq!(add.posix_line(), "git -c core.fsmonitor=false add --all");
     assert_eq!(add.code, Some(0));
     assert_eq!(Path::new(&add.cwd), session.workdir());
+}
+
+/// A repository whose configuration names a program is not trusted until the user says so;
+/// until then writes do not run.
+#[test]
+fn untrusted_repositories_refuse_writes() {
+    let f = Fixture::new();
+    f.write("a");
+    f.git(&["config", "core.hooksPath", "hooks"]);
+    let session = f.open();
+    assert!(!session.is_trusted());
+    assert_eq!(session.trust_report().settings[0].key, "core.hookspath");
+    let refused = session.submit(Command::StageAll);
+    let got = settle(&session);
+    assert!(got.iter().any(|e| matches!(
+        e,
+        Event::Finished { id, result: Err(GitError::NotTrusted), .. } if *id == refused
+    )));
+    assert!(staged(&last_snapshot(&got)).is_empty());
+    assert!(
+        !session.command_log().entries().iter().any(|e| e.write),
+        "git never ran"
+    );
+
+    session.set_trusted(true);
+    session.submit(Command::StageAll);
+    assert_eq!(staged(&last_snapshot(&settle(&session))), ["a"]);
+}
+
+#[test]
+fn plain_repositories_are_trusted() {
+    let f = Fixture::new();
+    assert!(f.open().is_trusted());
 }
