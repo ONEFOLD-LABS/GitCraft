@@ -1104,9 +1104,10 @@ fn command_log_shows_and_copies_calls() {
     );
     settle(&mut h);
     assert!(h.state().log_panel.open);
-    let add = "git -c core.fsmonitor=false --literal-pathspecs add --all --pathspec-from-file=- --pathspec-file-nul";
+    // The line is the POSIX form; Windows copies the PowerShell one.
     #[cfg(unix)]
     {
+        let add = "git -c core.fsmonitor=false --literal-pathspecs add --all --pathspec-from-file=- --pathspec-file-nul";
         h.get_by_role_and_label(egui::accesskit::Role::Button, add)
             .click();
         h.step();
