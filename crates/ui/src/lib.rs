@@ -22,11 +22,11 @@ use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_core::{Command, DiffKey, Event, Outcome, RepoSession, Snapshot, Task, Wake};
 use gitcraft_git::{
     Change, ChangedFile, Conflict, FileChange, FileStatus, GitError, GitRunner, GitVersion, Head,
-    MIN_VERSION, Oid, Status, escape,
+    MIN_VERSION, Oid, RepoPath, Status, escape,
 };
 
 use crate::avatars::Avatars;
-use crate::diffview::Prepared;
+use crate::diffview::{DiffAction, Prepared};
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
 use crate::search::{BarAction, Search};
@@ -55,12 +55,44 @@ enum Tone {
     Untracked,
 }
 
+/// What staging does with a file row or a whole section.
+#[derive(Debug, Clone, PartialEq)]
+enum StageOp {
+    Stage(Vec<RepoPath>),
+    Unstage(Vec<RepoPath>),
+}
+
+impl StageOp {
+    fn label(&self) -> &'static str {
+        match self {
+            StageOp::Stage(_) => "Vormerken",
+            StageOp::Unstage(_) => "Zurücknehmen",
+        }
+    }
+
+    fn all_label(&self) -> &'static str {
+        match self {
+            StageOp::Stage(_) => "Alle vormerken",
+            StageOp::Unstage(_) => "Alle zurücknehmen",
+        }
+    }
+
+    fn command(self) -> Command {
+        match self {
+            StageOp::Stage(p) => Command::Stage(p),
+            StageOp::Unstage(p) => Command::Unstage(p),
+        }
+    }
+}
+
 /// One line of the change list of the work in progress.
 #[derive(Debug, Clone, PartialEq)]
 enum Row {
     Section {
         title: &'static str,
         count: usize,
+        /// "Stage all" or "unstage all" for the section.
+        all: Option<StageOp>,
     },
     File {
         letter: char,
@@ -70,6 +102,8 @@ enum Row {
         path: String,
         /// The diff a click opens (none for conflicts until the conflict view exists).
         diff: Option<DiffKey>,
+        /// What a double click or the row's button does (none for conflicts).
+        stage: Option<StageOp>,
     },
 }
 
@@ -112,6 +146,10 @@ pub struct RepoWindow {
     show_keys: bool,
     avatars: Avatars,
     error: Option<String>,
+    /// A write waiting for the user to trust the repository (the trust dialog is open).
+    trust_prompt: Option<Command>,
+    /// The user chose to keep this repository read-only (no more asking until it is reopened).
+    read_only: bool,
     /// The repository being opened; a newer open replaces it (the older result is dropped).
     opening: Option<(PathBuf, Task<Opened>)>,
     git_version: Option<GitVersion>,
@@ -143,6 +181,8 @@ impl RepoWindow {
             show_keys: false,
             avatars: Avatars::off(),
             error: None,
+            trust_prompt: None,
+            read_only: false,
             opening: None,
             git_version: None,
             version: None,
@@ -208,6 +248,39 @@ impl RepoWindow {
         }
     }
 
+    /// Runs a write in the open repository; asks first when its program settings are not
+    /// trusted yet (docs/security.md T1).
+    /// Returns whether the write was submitted right away.
+    fn write(&mut self, command: Command) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        if session.is_trusted() {
+            session.submit(command);
+            return true;
+        }
+        if self.read_only {
+            self.error = Some(error_text(&GitError::NotTrusted));
+        } else {
+            self.trust_prompt = Some(command);
+        }
+        false
+    }
+
+    /// The user trusts the open repository: remembered in the settings, the waiting write runs.
+    fn trust(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        self.settings
+            .trust(session.workdir(), session.git_dir(), session.trust_report());
+        session.set_trusted(true);
+        if let Some(command) = self.trust_prompt.take() {
+            session.submit(command);
+        }
+        self.save_settings();
+    }
+
     /// True while git is working for the window (the history may still load afterwards).
     pub fn is_busy(&self) -> bool {
         self.opening.is_some() || self.session.as_ref().is_some_and(RepoSession::busy)
@@ -230,6 +303,17 @@ impl RepoWindow {
     /// Shows a freshly opened repository; the history starts loading.
     fn show_opened(&mut self, session: RepoSession, snapshot: Arc<Snapshot>, ctx: &egui::Context) {
         self.history = History::start(&session.reader(), ctx);
+        self.trust_prompt = None;
+        self.read_only = false;
+        if !session.is_trusted()
+            && self.settings.is_trusted(
+                session.workdir(),
+                session.git_dir(),
+                session.trust_report(),
+            )
+        {
+            session.set_trusted(true);
+        }
         self.session = Some(session);
         self.selection = Selection::None;
         self.details = None;
@@ -342,6 +426,7 @@ impl RepoWindow {
                 }
             }
             (_, Err(e)) => self.error = Some(error_text(&e)),
+            (_, Ok(Outcome::Written(_))) => self.error = None,
             (_, Ok(_)) => {}
         }
     }
@@ -373,6 +458,7 @@ impl RepoWindow {
         let t = theme::tokens(&ctx);
         self.settings_window(&ctx);
         self.keys_window(&ctx);
+        self.trust_dialog(&ctx);
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
         if let Some(error) = &self.error {
@@ -481,24 +567,38 @@ impl RepoWindow {
         let Some(state) = self.diff.as_mut() else {
             return;
         };
-        let back = match (&mut state.prepared, &state.error) {
-            (_, Some(e)) => {
-                let back = ui.button(tr("Zurück zum Graphen")).clicked();
-                ui.label(RichText::new(e).color(t.error_text));
-                back
+        let op = diff_stage_op(&state.key);
+        let back = |ui: &mut egui::Ui| {
+            if ui.button(tr("Zurück zum Graphen")).clicked() {
+                DiffAction::Back
+            } else {
+                DiffAction::None
             }
-            (Some(prepared), None) => prepared.show(ui, t),
+        };
+        let action = match (&mut state.prepared, &state.error) {
+            (_, Some(e)) => {
+                let action = back(ui);
+                ui.label(RichText::new(e).color(t.error_text));
+                action
+            }
+            (Some(prepared), None) => prepared.show(ui, t, op.as_ref().map(StageOp::label)),
             (None, None) => {
-                let back = ui.button(tr("Zurück zum Graphen")).clicked();
+                let action = back(ui);
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new(tr("Lade Diff …")).color(t.text_dim));
                 });
-                back
+                action
             }
         };
-        if back {
-            self.diff = None;
+        match action {
+            DiffAction::Back => self.diff = None,
+            DiffAction::Act => {
+                if let Some(op) = op {
+                    self.stage(op);
+                }
+            }
+            DiffAction::None => {}
         }
     }
 
@@ -703,6 +803,76 @@ impl RepoWindow {
         });
     }
 
+    /// Asks whether the open repository may run the programs its configuration names, before
+    /// the first write (docs/security.md T1). Esc or a click outside keeps the write from
+    /// running and asks again next time.
+    fn trust_dialog(&mut self, ctx: &egui::Context) {
+        if self.trust_prompt.is_none() {
+            return;
+        }
+        let Some(report) = self.session.as_ref().map(|s| s.trust_report().clone()) else {
+            self.trust_prompt = None;
+            return;
+        };
+        let t = theme::tokens(ctx);
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("gitcraft-vertrauen")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.label(
+                RichText::new(tr("Diesem Repository vertrauen?"))
+                    .color(t.text_strong)
+                    .size(16.0),
+            );
+            ui.add_space(4.0);
+            ui.label(tr(
+                "Die Konfiguration dieses Repositorys lässt Git Programme starten. Beim Lesen schaltet GitCraft sie ab; beim Ändern (Vormerken, Commit, …) laufen sie mit. Vertraue dem Repository nur, wenn du weißt, woher es stammt.",
+            ));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for s in &report.settings {
+                        ui.label(
+                            RichText::new(format!("{} = {}", escape(&s.key), escape(&s.value)))
+                                .monospace(),
+                        );
+                    }
+                    if !report.hooks.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(trf(
+                            "Hooks in {ordner}:",
+                            &[("ordner", &shown_path(&report.hooks_dir))],
+                        ));
+                        for h in &report.hooks {
+                            ui.label(RichText::new(escape(h)).monospace());
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(tr("Vertrauen")).clicked() {
+                    choice = Some(true);
+                }
+                if ui
+                    .button(tr("Nur lesen"))
+                    .on_hover_text(tr("Bis zum nächsten Öffnen nichts ändern und nicht mehr fragen"))
+                    .clicked()
+                {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => self.trust(),
+            Some(false) => {
+                self.trust_prompt = None;
+                self.read_only = true;
+            }
+            None if modal.should_close() => self.trust_prompt = None,
+            None => {}
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -726,6 +896,36 @@ impl RepoWindow {
                     ))
                     .color(t.text_dim),
                 );
+                ui.add_space(10.0);
+                ui.label(RichText::new(tr("Vertraute Repositories")).color(t.text_strong));
+                ui.label(
+                    RichText::new(tr(
+                        "Diese Repositories dürfen beim Ändern die Programme starten, die ihre Konfiguration nennt.",
+                    ))
+                    .color(t.text_dim),
+                );
+                if self.settings.trusted.is_empty() {
+                    ui.label(RichText::new(tr("Keine")).color(t.text_dim));
+                }
+                let mut revoke = None;
+                for (i, entry) in self.settings.trusted.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button(tr("Vertrauen entziehen")).clicked() {
+                            revoke = Some(i);
+                        }
+                        ui.add(egui::Label::new(shown_path(&entry.workdir)).truncate());
+                    });
+                }
+                if let Some(i) = revoke {
+                    let entry = self.settings.trusted.remove(i);
+                    changed = true;
+                    if let Some(session) = &self.session
+                        && session.workdir() == entry.workdir
+                        && !session.trust_report().is_empty()
+                    {
+                        session.set_trusted(false);
+                    }
+                }
             });
         self.show_settings = open;
         if changed {
@@ -1057,13 +1257,15 @@ impl RepoWindow {
         }
     }
 
-    /// The change list of the work in progress (staging comes in milestone 0.3). A click on a
-    /// file shows its diff.
+    /// The change list of the work in progress: what is not staged yet, then what is. A click
+    /// on a file shows its diff; a double click, the row's button or its context menu stages or
+    /// unstages it; each section stages or unstages all of its files.
     fn changes(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
-        let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
+        let row_h = ui.text_style_height(&egui::TextStyle::Body).max(20.0) + 2.0;
         let current = self.diff.as_ref().map(|s| s.key.clone());
         let mut open: Option<(DiffKey, String)> = None;
+        let mut op: Option<StageOp> = None;
         let rows = &self.rows;
         egui::ScrollArea::vertical()
             .id_salt("changes")
@@ -1071,26 +1273,105 @@ impl RepoWindow {
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for (i, row) in rows.iter().enumerate().skip(range.start).take(range.len()) {
                     let size = egui::vec2(ui.available_width(), row_h);
-                    let inner = ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                        let selected = matches!(row, Row::File { diff: Some(k), .. } if Some(k) == current.as_ref());
-                        if selected {
-                            ui.painter().rect_filled(ui.max_rect(), 0.0, t.selection);
-                        } else if i % 2 == 1 && matches!(row, Row::File { .. }) {
-                            // Stripes on file rows only, so section titles stand apart.
-                            ui.painter().rect_filled(ui.max_rect(), 0.0, t.row_alt);
+                    let file = matches!(row, Row::File { .. });
+                    let sense = if file { egui::Sense::click() } else { egui::Sense::hover() };
+                    let (rect, resp) = ui.allocate_exact_size(size, sense);
+                    let selected = matches!(row, Row::File { diff: Some(k), .. } if Some(k) == current.as_ref());
+                    if selected {
+                        ui.painter().rect_filled(rect, 0.0, t.selection);
+                    } else if i % 2 == 1 && file {
+                        // Stripes on file rows only, so section titles stand apart.
+                        ui.painter().rect_filled(rect, 0.0, t.row_alt);
+                    }
+                    let hot = ui.rect_contains_pointer(rect) || resp.has_focus();
+                    // Drawn after the row's own response, so the buttons get the clicks.
+                    let mut cell = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(Layout::right_to_left(Align::Center)),
+                    );
+                    match row {
+                        Row::Section { all, .. } => {
+                            if let Some(all) = all
+                                && cell.small_button(tr(all.all_label())).clicked()
+                            {
+                                op = Some(all.clone());
+                            }
+                            cell.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                draw_row(ui, row, t);
+                            });
                         }
-                        draw_row(ui, row, t);
-                    });
-                    if let Row::File { diff: Some(key), path, .. } = row {
-                        let resp = ui.interact(inner.response.rect, ui.scope_id().with(("change", i)), egui::Sense::click());
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, path));
-                        if resp.clicked() {
-                            open = Some((key.clone(), path.clone()));
+                        Row::File { diff, stage, path, .. } => {
+                            if let Some(stage) = stage
+                                && hot
+                                && cell.small_button(tr(stage.label())).clicked()
+                            {
+                                op = Some(stage.clone());
+                            }
+                            cell.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                draw_row(ui, row, t);
+                            });
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, path));
+                            if resp.double_clicked() {
+                                op = stage.clone();
+                            } else if resp.clicked()
+                                && let Some(key) = diff
+                            {
+                                open = Some((key.clone(), path.clone()));
+                            }
+                            resp.context_menu(|ui| {
+                                if let Some(stage) = stage
+                                    && ui.button(tr(stage.label())).clicked()
+                                {
+                                    op = Some(stage.clone());
+                                    ui.close();
+                                }
+                                if ui.button(tr("Pfad kopieren")).clicked() {
+                                    // The file's own path, also for a rename ("old -> new").
+                                    let copied = match diff {
+                                        Some(
+                                            DiffKey::Worktree { path, .. }
+                                            | DiffKey::Untracked { path },
+                                        ) => path.display(),
+                                        _ => path.clone(),
+                                    };
+                                    ui.ctx().copy_text(copied);
+                                    ui.close();
+                                }
+                            });
                         }
                     }
                 }
             });
         if let Some((key, title)) = open {
+            self.open_diff(key, title);
+        }
+        if let Some(op) = op {
+            self.stage(op);
+        }
+    }
+
+    /// Stages or unstages; an open diff of one of the files follows it to the other side.
+    fn stage(&mut self, op: StageOp) {
+        let paths = match &op {
+            StageOp::Stage(p) | StageOp::Unstage(p) => p.clone(),
+        };
+        if !self.write(op.command()) {
+            return;
+        }
+        let follow = self.diff.as_ref().and_then(|state| {
+            let path = match &state.key {
+                DiffKey::Worktree { path, .. } | DiffKey::Untracked { path } => path,
+                DiffKey::Commit { .. } => return None,
+            };
+            paths
+                .contains(path)
+                .then(|| moved_key(&state.key))
+                .flatten()
+                .map(|key| (key, state.title.clone()))
+        });
+        if let Some((key, title)) = follow {
+            // The refresh after the write reloads it.
             self.open_diff(key, title);
         }
     }
@@ -1189,6 +1470,39 @@ impl RepoWindow {
 }
 
 /// The branch name for the toolbar, or `HEAD 1a2b3c4` when detached.
+/// Staging the file a diff shows: stage a working-tree or untracked diff, unstage a staged one.
+fn diff_stage_op(key: &DiffKey) -> Option<StageOp> {
+    match key {
+        DiffKey::Commit { .. } => None,
+        DiffKey::Worktree { path, old, staged } => {
+            let paths: Vec<RepoPath> = std::iter::once(path.clone()).chain(old.clone()).collect();
+            Some(if *staged {
+                StageOp::Unstage(paths)
+            } else {
+                StageOp::Stage(paths)
+            })
+        }
+        DiffKey::Untracked { path } => Some(StageOp::Stage(vec![path.clone()])),
+    }
+}
+
+/// The diff of the same file on the other side of the index, after staging or unstaging it.
+fn moved_key(key: &DiffKey) -> Option<DiffKey> {
+    match key {
+        DiffKey::Commit { .. } => None,
+        DiffKey::Worktree { path, old, staged } => Some(DiffKey::Worktree {
+            path: path.clone(),
+            old: old.clone(),
+            staged: !staged,
+        }),
+        DiffKey::Untracked { path } => Some(DiffKey::Worktree {
+            path: path.clone(),
+            old: None,
+            staged: true,
+        }),
+    }
+}
+
 /// Asks egui for a repaint from a worker thread.
 fn wake(ctx: &egui::Context) -> Wake {
     let ctx = ctx.clone();
@@ -1217,10 +1531,12 @@ fn head_commit(status: &Status) -> Option<Oid> {
 }
 
 fn draw_row(ui: &mut egui::Ui, row: &Row, t: &theme::Tokens) {
+    // Not selectable: the row underneath takes the clicks (diff, double click to stage).
+    let label = |text: RichText| egui::Label::new(text).selectable(false);
     match row {
-        Row::Section { title, count } => {
-            ui.label(RichText::new(tr(title)).color(t.text_strong));
-            ui.label(RichText::new(count.to_string()).color(t.text_dim));
+        Row::Section { title, count, .. } => {
+            ui.add(label(RichText::new(tr(title)).color(t.text_strong)));
+            ui.add(label(RichText::new(count.to_string()).color(t.text_dim)));
         }
         Row::File {
             letter,
@@ -1238,9 +1554,11 @@ fn draw_row(ui: &mut egui::Ui, row: &Row, t: &theme::Tokens) {
                 Tone::Untracked => t.untracked,
             };
             ui.add_space(12.0);
-            ui.label(RichText::new(letter.to_string()).monospace().color(colour))
-                .on_hover_text(tr(meaning));
-            ui.add(egui::Label::new(path.as_str()).truncate())
+            ui.add(label(
+                RichText::new(letter.to_string()).monospace().color(colour),
+            ))
+            .on_hover_text(tr(meaning));
+            ui.add(label(RichText::new(path.as_str())).truncate())
                 .on_hover_text(tr(meaning));
         }
     }
@@ -1317,6 +1635,11 @@ fn change_row(file: &FileChange, change: Change, staged: bool) -> Row {
         }
         _ => file.path.display(),
     };
+    // A rename moves both paths: the old one's deletion goes with the new one.
+    let mut paths = vec![file.path.clone()];
+    if let (Some(orig), Change::Renamed) = (&file.orig_path, change) {
+        paths.push(orig.clone());
+    }
     Row::File {
         letter: change.letter(),
         tone,
@@ -1326,6 +1649,11 @@ fn change_row(file: &FileChange, change: Change, staged: bool) -> Row {
             path: file.path.clone(),
             old: file.orig_path.clone(),
             staged,
+        }),
+        stage: Some(if staged {
+            StageOp::Unstage(paths)
+        } else {
+            StageOp::Stage(paths)
         }),
     }
 }
@@ -1342,18 +1670,34 @@ fn conflict_meaning(c: Conflict) -> &'static str {
     }
 }
 
-/// The change list: conflicts first (they block everything else), then staged, unstaged and
-/// untracked; empty sections are left out.
+/// The rows of the change list: conflicts, not staged (changed and untracked files), staged.
 fn rows(status: &Status) -> Vec<Row> {
     let mut out = Vec::new();
     let mut section = |title: &'static str, items: Vec<Row>| {
-        if !items.is_empty() {
-            out.push(Row::Section {
-                title,
-                count: items.len(),
-            });
-            out.extend(items);
+        if items.is_empty() {
+            return;
         }
+        let mut all: Option<StageOp> = None;
+        for item in &items {
+            let Row::File {
+                stage: Some(op), ..
+            } = item
+            else {
+                continue;
+            };
+            match (&mut all, op) {
+                (None, op) => all = Some(op.clone()),
+                (Some(StageOp::Stage(a)), StageOp::Stage(p))
+                | (Some(StageOp::Unstage(a)), StageOp::Unstage(p)) => a.extend(p.iter().cloned()),
+                _ => {}
+            }
+        }
+        out.push(Row::Section {
+            title,
+            count: items.len(),
+            all,
+        });
+        out.extend(items);
     };
     section(
         "Konflikte",
@@ -1364,8 +1708,27 @@ fn rows(status: &Status) -> Vec<Row> {
                 tone: Tone::Conflict,
                 meaning: conflict_meaning(c),
                 diff: None,
+                stage: None,
                 path: f.path.display(),
             })
+            .collect(),
+    );
+    let untracked = status.untracked().map(|f| Row::File {
+        letter: '?',
+        tone: Tone::Untracked,
+        meaning: "unversioniert",
+        diff: Some(DiffKey::Untracked {
+            path: f.path.clone(),
+        }),
+        stage: Some(StageOp::Stage(vec![f.path.clone()])),
+        path: f.path.display(),
+    });
+    section(
+        "Nicht vorgemerkt",
+        status
+            .unstaged()
+            .map(|(f, c)| change_row(f, c, false))
+            .chain(untracked)
             .collect(),
     );
     section(
@@ -1373,28 +1736,6 @@ fn rows(status: &Status) -> Vec<Row> {
         status
             .staged()
             .map(|(f, c)| change_row(f, c, true))
-            .collect(),
-    );
-    section(
-        "Nicht vorgemerkt",
-        status
-            .unstaged()
-            .map(|(f, c)| change_row(f, c, false))
-            .collect(),
-    );
-    section(
-        "Unversioniert",
-        status
-            .untracked()
-            .map(|f| Row::File {
-                letter: '?',
-                tone: Tone::Untracked,
-                meaning: "unversioniert",
-                diff: Some(DiffKey::Untracked {
-                    path: f.path.clone(),
-                }),
-                path: f.path.display(),
-            })
             .collect(),
     );
     out

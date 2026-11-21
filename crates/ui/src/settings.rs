@@ -6,7 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+use gitcraft_git::TrustReport;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const FILE: &str = "settings.json";
 
@@ -16,6 +18,25 @@ pub struct Settings {
     /// Load author images from Gravatar (sends a hash of each author's e-mail address; off by
     /// default, docs/decisions/ADR-005).
     pub avatars: bool,
+    /// Repositories whose program settings the user trusts (docs/security.md T1).
+    pub trusted: Vec<TrustedRepo>,
+}
+
+/// A repository the user trusts, with what it would run at that time: when its settings or
+/// hooks change, GitCraft asks again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedRepo {
+    pub workdir: PathBuf,
+    pub git_dir: PathBuf,
+    /// SHA-256 of [`TrustReport::canonical`].
+    pub fingerprint: String,
+}
+
+fn fingerprint(report: &TrustReport) -> String {
+    Sha256::digest(report.canonical().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What loading the settings found.
@@ -29,6 +50,25 @@ pub enum Loaded {
 }
 
 impl Settings {
+    /// The user trusted this repository with exactly these settings and hooks.
+    pub fn is_trusted(&self, workdir: &Path, git_dir: &Path, report: &TrustReport) -> bool {
+        let print = fingerprint(report);
+        self.trusted
+            .iter()
+            .any(|t| t.workdir == workdir && t.git_dir == git_dir && t.fingerprint == print)
+    }
+
+    /// Remembers that the user trusts the repository as it is now.
+    pub fn trust(&mut self, workdir: &Path, git_dir: &Path, report: &TrustReport) {
+        self.trusted
+            .retain(|t| !(t.workdir == workdir && t.git_dir == git_dir));
+        self.trusted.push(TrustedRepo {
+            workdir: workdir.to_path_buf(),
+            git_dir: git_dir.to_path_buf(),
+            fingerprint: fingerprint(report),
+        });
+    }
+
     /// Reads the settings from `dir`; defaults when there are none or they are broken.
     pub fn load(dir: &Path) -> (Settings, Loaded) {
         let path = dir.join(FILE);
@@ -103,7 +143,10 @@ mod tests {
             Settings::load(dir.path()),
             (Settings::default(), Loaded::Missing)
         );
-        let s = Settings { avatars: true };
+        let s = Settings {
+            avatars: true,
+            ..Settings::default()
+        };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), (s, Loaded::Ok));
 
@@ -122,5 +165,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE), r#"{"future": 1}"#).unwrap();
         assert_eq!(Settings::load(dir.path()).0, Settings::default());
+    }
+
+    #[test]
+    fn trust_is_bound_to_path_git_dir_and_what_would_run() {
+        let report = TrustReport {
+            settings: vec![gitcraft_git::ProgramSetting {
+                key: "core.hookspath".into(),
+                value: ".husky".into(),
+            }],
+            ..TrustReport::default()
+        };
+        let (w, g) = (Path::new("/r"), Path::new("/r/.git"));
+        let mut s = Settings::default();
+        assert!(!s.is_trusted(w, g, &report));
+        s.trust(w, g, &report);
+        s.trust(w, g, &report);
+        assert_eq!(s.trusted.len(), 1, "trusting again replaces the entry");
+        assert!(s.is_trusted(w, g, &report));
+        assert!(!s.is_trusted(Path::new("/other"), g, &report));
+        assert!(!s.is_trusted(w, Path::new("/x/.git"), &report));
+        let mut changed = report.clone();
+        changed.hooks.push("pre-commit".into());
+        assert!(!s.is_trusted(w, g, &changed), "a new hook asks again");
+
+        let dir = tempfile::tempdir().unwrap();
+        s.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()).0, s);
     }
 }

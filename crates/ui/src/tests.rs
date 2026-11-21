@@ -207,18 +207,42 @@ fn rows_group_conflicts_staged_unstaged_and_untracked() {
         .rows
         .iter()
         .filter_map(|r| match r {
-            Row::Section { title, count } => Some((*title, *count)),
+            Row::Section { title, count, .. } => Some((*title, *count)),
             Row::File { .. } => None,
         })
         .collect();
     assert_eq!(
         sections,
-        [
-            ("Konflikte", 1),
-            ("Vorgemerkt", 2),
-            ("Nicht vorgemerkt", 2),
-            ("Unversioniert", 1)
-        ]
+        [("Konflikte", 1), ("Nicht vorgemerkt", 3), ("Vorgemerkt", 2)]
+    );
+    let all = |title: &str| {
+        w.rows.iter().find_map(|r| match r {
+            Row::Section { title: t, all, .. } if *t == title => Some(all.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        all("Konflikte"),
+        Some(None),
+        "conflicts are not staged from here"
+    );
+    let p = |n: &str| RepoPath::from_bytes(n.as_bytes());
+    assert_eq!(
+        all("Nicht vorgemerkt"),
+        Some(Some(StageOp::Stage(vec![
+            p("docs/plan.md"),
+            p("src/main.rs"),
+            p("notizen/Grüße aus Köln.txt")
+        ])))
+    );
+    // Unstaging a rename takes both paths back.
+    assert_eq!(
+        all("Vorgemerkt"),
+        Some(Some(StageOp::Unstage(vec![
+            p("Cargo.toml"),
+            p("src/neu.rs"),
+            p("src/alt.rs")
+        ])))
     );
     assert!(w.rows.iter().any(|r| matches!(r, Row::File {
         letter: 'R',
@@ -288,7 +312,10 @@ fn texts_behind_variables_are_translated() {
         "Konflikte",
         "Vorgemerkt",
         "Nicht vorgemerkt",
-        "Unversioniert",
+        "Vormerken",
+        "Zurücknehmen",
+        "Alle vormerken",
+        "Alle zurücknehmen",
         "hinzugefügt",
         "geändert",
         "Dateityp geändert",
@@ -639,4 +666,143 @@ fn help_window_opens_the_donation_page() {
             |c| matches!(c, egui::OutputCommand::OpenUrl(u) if u.url == SPONSOR_URL && u.new_tab),
         );
     assert!(opened, "the donation page was not opened");
+}
+
+/// Runs the window until git has answered (at most 20 s).
+fn settle(harness: &mut Harness<'_, RepoWindow>) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        harness.step();
+        if !harness.state().is_busy() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "git did not answer in time");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    harness.run_steps(2);
+}
+
+fn harness(w: RepoWindow) -> Harness<'static, RepoWindow> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 640.0))
+        .wgpu()
+        .build_ui_state(|ui, w: &mut RepoWindow| w.ui(ui), w);
+    h.run_steps(2);
+    h
+}
+
+fn staged_paths(w: &RepoWindow) -> Vec<String> {
+    w.status()
+        .unwrap()
+        .staged()
+        .map(|(f, _)| f.path.display())
+        .collect()
+}
+
+/// "Alle vormerken" and "Alle zurücknehmen" in the change list run git and show the result.
+#[test]
+fn sections_stage_and_unstage_all_their_files() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.commit_all("Anfang");
+    f.write("a.txt", "2");
+    f.write("neu.txt", "n");
+    let mut h = harness(f.window());
+    h.get_by_label("Alle vormerken").click();
+    settle(&mut h);
+    assert_eq!(staged_paths(h.state()), ["a.txt", "neu.txt"]);
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("staged-dark.png")).unwrap();
+    }
+    h.get_by_label("Alle zurücknehmen").click();
+    settle(&mut h);
+    assert!(staged_paths(h.state()).is_empty());
+    assert_eq!(h.state().error(), None);
+}
+
+/// A double click stages a single file; the button in the diff header unstages it again.
+#[test]
+fn files_are_staged_by_double_click_and_from_the_diff() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    f.write("b.txt", "1");
+    f.commit_all("Anfang");
+    f.write("a.txt", "2");
+    f.write("b.txt", "2");
+    let mut h = harness(f.window());
+    // A harness step is 0.25 s of simulated time: allow the double click to span frames.
+    h.ctx
+        .options_mut(|o| o.input_options.max_double_click_delay = 5.0);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "a.txt")
+        .click();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "a.txt")
+        .click();
+    settle(&mut h);
+    assert_eq!(staged_paths(h.state()), ["a.txt"]);
+    // The click before the double click opened the diff of the unstaged change; it follows
+    // the file to the staged side.
+    assert!(matches!(
+        h.state().diff.as_ref().map(|d| &d.key),
+        Some(DiffKey::Worktree { staged: true, .. })
+    ));
+    h.get_by_label("Zurücknehmen").click();
+    settle(&mut h);
+    assert!(staged_paths(h.state()).is_empty());
+}
+
+/// A repository whose configuration runs programs asks before the first write; trusting it
+/// runs the write and is remembered.
+#[test]
+fn the_first_write_asks_to_trust_the_repository() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    assert!(f.git(&["config", "core.hooksPath", "eigene-hooks"]));
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    let mut h = harness(w);
+    h.get_by_label("Alle vormerken").click();
+    h.run_steps(4);
+    assert!(h.state().trust_prompt.is_some());
+    h.get_by_label("Vertrauen");
+    if let (Ok(img), Ok(shots)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&shots).join("trust-dark.png")).unwrap();
+    }
+    h.get_by_label("Vertrauen").click();
+    settle(&mut h);
+    assert_eq!(staged_paths(h.state()), ["a.txt"]);
+    let (saved, _) = settings::Settings::load(dir.path());
+    assert_eq!(saved.trusted.len(), 1);
+
+    // Opened again: trusted without asking.
+    let mut w = f.window();
+    w.use_settings(Some(dir.path().to_path_buf()));
+    let session = w.session.take().unwrap();
+    let snapshot = std::sync::Arc::new(w.snapshot.as_deref().unwrap().clone());
+    w.show_opened(session, snapshot, &egui::Context::default());
+    assert!(w.session.as_ref().unwrap().is_trusted());
+}
+
+/// "Nur lesen" keeps the repository unchanged and stops asking.
+#[test]
+fn read_only_refuses_writes_with_an_explanation() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    assert!(f.git(&["config", "core.sshCommand", "ssh -v"]));
+    let mut h = harness(f.window());
+    h.get_by_label("Alle vormerken").click();
+    h.run_steps(4);
+    h.get_by_label("Nur lesen").click();
+    h.run_steps(4);
+    assert!(h.state().trust_prompt.is_none());
+    h.get_by_label("Alle vormerken").click();
+    h.run_steps(4);
+    assert!(h.state().trust_prompt.is_none(), "no second question");
+    assert!(
+        h.state()
+            .error()
+            .is_some_and(|e| e.contains("nur zum Lesen"))
+    );
+    assert!(staged_paths(h.state()).is_empty());
 }

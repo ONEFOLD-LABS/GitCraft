@@ -144,3 +144,18 @@ Zurück zum Graphen	Back to the graph
 Öffnen …	Open …
 Abgebrochen.	Cancelled.
 Dieses Repository ist nur zum Lesen geöffnet: Seine Konfiguration startet Programme, denen du noch nicht vertraut hast.	This repository is open read-only: its configuration starts programs you have not trusted yet.
+Bis zum nächsten Öffnen nichts ändern und nicht mehr fragen	Change nothing and stop asking until it is opened again
+Die Konfiguration dieses Repositorys lässt Git Programme starten. Beim Lesen schaltet GitCraft sie ab; beim Ändern (Vormerken, Commit, …) laufen sie mit. Vertraue dem Repository nur, wenn du weißt, woher es stammt.	This repository's configuration makes Git start programs. GitCraft switches them off for reading; when you change something (stage, commit, …) they run. Trust the repository only if you know where it comes from.
+Diese Repositories dürfen beim Ändern die Programme starten, die ihre Konfiguration nennt.	These repositories may start the programs their configuration names when you change something.
+Diesem Repository vertrauen?	Trust this repository?
+Hooks in {ordner}:	Hooks in {ordner}:
+Keine	None
+Nur lesen	Read only
+Pfad kopieren	Copy path
+Vormerken	Stage
+Zurücknehmen	Unstage
+Alle vormerken	Stage all
+Alle zurücknehmen	Unstage all
+Vertrauen	Trust
+Vertrauen entziehen	Revoke trust
+Vertraute Repositories	Trusted repositories
