@@ -6,6 +6,7 @@
 //! history and search threads; the window never waits for it.
 
 mod avatars;
+mod commit;
 mod diffview;
 mod history;
 pub mod i18n;
@@ -26,6 +27,7 @@ use gitcraft_git::{
 };
 
 use crate::avatars::Avatars;
+use crate::commit::{CommitForm, FormAction};
 use crate::diffview::{DiffAction, Prepared};
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
@@ -146,6 +148,10 @@ pub struct RepoWindow {
     show_keys: bool,
     avatars: Avatars,
     error: Option<String>,
+    /// The commit form of the work in progress.
+    commit: CommitForm,
+    /// Commit messages not committed yet, per repository (working tree).
+    drafts: std::collections::HashMap<PathBuf, (String, String)>,
     /// A write waiting for the user to trust the repository (the trust dialog is open).
     trust_prompt: Option<Command>,
     /// The user chose to keep this repository read-only (no more asking until it is reopened).
@@ -181,6 +187,8 @@ impl RepoWindow {
             show_keys: false,
             avatars: Avatars::off(),
             error: None,
+            commit: CommitForm::default(),
+            drafts: std::collections::HashMap::new(),
             trust_prompt: None,
             read_only: false,
             opening: None,
@@ -305,6 +313,20 @@ impl RepoWindow {
         self.history = History::start(&session.reader(), ctx);
         self.trust_prompt = None;
         self.read_only = false;
+        // Keep the draft of the repository shown so far; pick up this one's.
+        if let Some(old) = &self.session {
+            let draft = (
+                std::mem::take(&mut self.commit.summary),
+                std::mem::take(&mut self.commit.body),
+            );
+            self.drafts.insert(old.workdir().to_path_buf(), draft);
+        }
+        self.commit = CommitForm::default();
+        if let Some((summary, body)) = self.drafts.remove(session.workdir()) {
+            self.commit.summary = summary;
+            self.commit.body = body;
+        }
+        session.submit(Command::Identity);
         if !session.is_trusted()
             && self.settings.is_trusted(
                 session.workdir(),
@@ -425,6 +447,24 @@ impl RepoWindow {
                     }
                 }
             }
+            (Command::Commit { .. }, Ok(Outcome::Written(out))) => {
+                self.commit.committed(&out.stderr);
+                self.error = None;
+            }
+            (Command::Commit { .. }, Err(e)) => {
+                self.commit.failed();
+                self.error = Some(error_text(&e));
+            }
+            (Command::Identity, Ok(Outcome::Identity(identity))) => {
+                self.commit.set_identity(identity);
+            }
+            (Command::SetIdentity { .. }, Ok(_)) => {
+                self.error = None;
+                if let Some(session) = &self.session {
+                    session.submit(Command::Identity);
+                }
+            }
+            (Command::AmendInfo, Ok(Outcome::AmendInfo(info))) => self.commit.set_amend_info(info),
             (_, Err(e)) => self.error = Some(error_text(&e)),
             (_, Ok(Outcome::Written(_))) => self.error = None,
             (_, Ok(_)) => {}
@@ -1006,6 +1046,7 @@ impl RepoWindow {
                         "Commit wählen",
                     ),
                     (f(&COPY), "Commit-ID kopieren"),
+                    (f(&commit::COMMIT_KEY), "Committen (im Commit-Formular)"),
                     ("Esc".to_owned(), "Diff oder Suche schließen"),
                     (tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0").to_owned(), "Zoom"),
                     (f(&KEYS), "Diese Übersicht"),
@@ -1101,7 +1142,44 @@ impl RepoWindow {
                         .size(15.0),
                 );
                 ui.add_space(4.0);
+                let staged = self.status().map_or(0, |s| s.staged().count());
+                let action = egui::Panel::bottom("commit-formular")
+                    .resizable(false)
+                    .show(ui, |ui| self.commit.show(ui, t, staged))
+                    .inner;
                 self.changes(ui);
+                match action {
+                    Some(FormAction::Commit {
+                        message,
+                        amend,
+                        no_verify,
+                    }) => {
+                        if !self.write(Command::Commit {
+                            message,
+                            amend,
+                            no_verify,
+                        }) {
+                            self.commit.failed();
+                        }
+                    }
+                    Some(FormAction::LoadAmend) => {
+                        if let Some(session) = &self.session {
+                            session.submit(Command::AmendInfo);
+                        }
+                    }
+                    Some(FormAction::SetIdentity {
+                        name,
+                        email,
+                        global,
+                    }) => {
+                        self.write(Command::SetIdentity {
+                            name,
+                            email,
+                            global,
+                        });
+                    }
+                    None => {}
+                }
             }
             Selection::Commit(id) => {
                 let Some(c) = self.history.commit(&id).cloned() else {
@@ -1787,6 +1865,10 @@ fn error_text(e: &GitError) -> String {
             &[("schluessel", &escape(key))],
         ),
         GitError::Cancelled => tr("Abgebrochen.").to_owned(),
+        GitError::InvalidValue(v) => trf(
+            "Ungültige Eingabe: {wert}",
+            &[("wert", &escape(v))],
+        ),
         GitError::NotTrusted => tr("Dieses Repository ist nur zum Lesen geöffnet: Seine Konfiguration startet Programme, denen du noch nicht vertraut hast.").to_owned(),
         GitError::Parse(err) => trf(
             "Unerwartete Ausgabe von git: {fehler}",

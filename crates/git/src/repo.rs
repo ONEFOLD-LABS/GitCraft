@@ -489,6 +489,89 @@ impl Repository {
         self.write(args, Some(&pathspec_input(paths)), cancel)
     }
 
+    /// Commits the staged changes with `message` (on stdin, never in a temporary file).
+    /// Whitespace is cleaned up, lines starting with `#` are kept (they are text the user typed,
+    /// not editor comments). Hooks run as configured unless `no_verify`; signing follows the
+    /// configuration.
+    pub fn commit(
+        &self,
+        message: &str,
+        amend: bool,
+        no_verify: bool,
+        cancel: &Cancel,
+    ) -> Result<Written, GitError> {
+        let mut args = vec!["commit", "--file=-", "--cleanup=whitespace"];
+        if amend {
+            args.push("--amend");
+        }
+        if no_verify {
+            args.push("--no-verify");
+        }
+        self.write(args, Some(message.as_bytes()), cancel)
+    }
+
+    /// The configured author identity (`user.name`, `user.email`); `None` where it is missing.
+    pub fn identity(&self) -> Result<Identity, GitError> {
+        let get =
+            |key: &str| -> Result<Option<String>, GitError> {
+                match self.read(["config", "--get", key]) {
+                    Ok(out) => Ok(Some(String::from_utf8_lossy(&out).trim().to_owned())
+                        .filter(|v| !v.is_empty())),
+                    Err(GitError::Failed { code: Some(1), .. }) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            };
+        Ok(Identity {
+            name: get("user.name")?,
+            email: get("user.email")?,
+        })
+    }
+
+    /// Sets `user.name` and `user.email`, for every repository (`global`) or only this one.
+    /// Values with control characters are refused.
+    pub fn set_identity(
+        &self,
+        name: &str,
+        email: &str,
+        global: bool,
+        cancel: &Cancel,
+    ) -> Result<(), GitError> {
+        for value in [name, email] {
+            if value.trim().is_empty() || value.chars().any(char::is_control) {
+                return Err(GitError::InvalidValue(value.to_owned()));
+            }
+        }
+        let scope = if global { "--global" } else { "--local" };
+        for (key, value) in [("user.name", name.trim()), ("user.email", email.trim())] {
+            self.write(
+                ["config", scope, "--end-of-options", key, value],
+                None,
+                cancel,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The message of the commit at `HEAD`, and whether a remote-tracking branch already
+    /// contains it (then amending it needs a force push). `None` on an unborn branch.
+    pub fn head_for_amend(&self) -> Result<Option<(String, bool)>, GitError> {
+        if !self.has_head()? {
+            return Ok(None);
+        }
+        let message = self.read(["log", "-1", "--no-color", "--format=%B", "HEAD"])?;
+        let pushed = self.read([
+            "for-each-ref",
+            "--count=1",
+            "--contains=HEAD",
+            "--format=%(refname)",
+            "refs/remotes",
+        ])?;
+        Ok(Some((
+            String::from_utf8_lossy(&message).trim_end().to_owned(),
+            !pushed.is_empty(),
+        )))
+    }
+
     /// Checks a new branch name: git's rules (`git check-ref-format`), and never an option.
     /// The error says why a name is refused.
     pub fn check_branch_name(&self, name: &str) -> Result<(), NameError> {
@@ -502,6 +585,19 @@ impl Repository {
             Err(GitError::Failed { code: Some(1), .. }) => Err(NameError::Rules),
             Err(e) => Err(NameError::Git(e)),
         }
+    }
+}
+
+/// The author identity git would use.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl Identity {
+    pub fn is_complete(&self) -> bool {
+        self.name.is_some() && self.email.is_some()
     }
 }
 

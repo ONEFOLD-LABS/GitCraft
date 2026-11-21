@@ -159,3 +159,25 @@ Alle zurücknehmen	Unstage all
 Vertrauen	Trust
 Vertrauen entziehen	Revoke trust
 Vertraute Repositories	Trusted repositories
+Ungültige Eingabe: {wert}	Invalid input: {wert}
+Committen (im Commit-Formular)	Commit (in the commit form)
+Zusammenfassungen bis 72 Zeichen passen in jede Liste.	Summaries of up to 72 characters fit into every list.
+Zusammenfassung	Summary
+Was ändert dieser Commit?	What does this commit change?
+Beschreibung (optional)	Description (optional)
+Letzten Commit ändern	Amend last commit
+Hooks überspringen	Skip hooks
+Dieser Commit ist schon auf einem Remote. Nach dem Ändern braucht der Branch einen Force-Push, und wer den alten Commit schon hat, muss nacharbeiten.	This commit is already on a remote. After amending, the branch needs a force push, and anyone who already has the old commit has to catch up.
+Die Zusammenfassung fehlt.	The summary is missing.
+Noch nichts vorgemerkt.	Nothing staged yet.
+Commit ändern	Amend commit
+1 Datei committen	Commit 1 file
+{n} Dateien committen	Commit {n} files
+Ausgabe der Hooks:	Hook output:
+Wer committet?	Who is committing?
+Git speichert Name und E-Mail-Adresse in jedem Commit. Sie sind noch nicht eingestellt.	Git stores a name and e-mail address in every commit. They are not set yet.
+Name	Name
+E-Mail	E-mail
+Für alle Repositories	For all repositories
+Nur für dieses Repository	Only for this repository
+Speichern	Save

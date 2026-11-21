@@ -295,3 +295,38 @@ fn plain_repositories_are_trusted() {
     let f = Fixture::new();
     assert!(f.open().is_trusted());
 }
+
+#[test]
+fn commit_through_the_queue() {
+    let f = Fixture::new();
+    f.write("a");
+    let session = f.open();
+    session.submit(Command::SetIdentity {
+        name: "Test".into(),
+        email: "t@invalid".into(),
+        global: false,
+    });
+    session.submit(Command::StageAll);
+    let commit = session.submit(Command::Commit {
+        message: "Erster".into(),
+        amend: false,
+        no_verify: false,
+    });
+    let got = settle(&session);
+    assert!(got.iter().any(|e| matches!(
+        e,
+        Event::Finished { id, result: Ok(Outcome::Written(_)), .. } if *id == commit
+    )));
+    assert!(last_snapshot(&got).status.is_clean());
+    session.submit(Command::AmendInfo);
+    session.submit(Command::Identity);
+    let got = settle(&session);
+    assert!(got.iter().any(|e| matches!(
+        e,
+        Event::Finished { result: Ok(Outcome::AmendInfo(Some((m, false)))), .. } if m == "Erster"
+    )));
+    assert!(got.iter().any(|e| matches!(
+        e,
+        Event::Finished { result: Ok(Outcome::Identity(i)), .. } if i.is_complete()
+    )));
+}
