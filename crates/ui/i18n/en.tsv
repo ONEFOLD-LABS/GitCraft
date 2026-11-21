@@ -7,6 +7,8 @@ Arbeitsverzeichnis und Index entsprechen dem letzten Commit.	Working tree and in
 auf dem Stand von {upstream}	up to date with {upstream}
 Autor	Author
 Autorenbilder von Gravatar laden	Load author images from Gravatar
+binär	binary
+Binärdatei, nicht als Text darstellbar.	Binary file, cannot be shown as text.
 Branch	Branch
 Branch / Tag	Branch / tag
 Branch {name}	Branch {name}
@@ -21,10 +23,13 @@ Datum	Date
 Die Einstellungen konnten nicht gespeichert werden: {fehler}	The settings could not be saved: {fehler}
 Die Einstellungen waren nicht lesbar und wurden zurückgesetzt ({fehler}); die alte Datei liegt als settings.json.bak daneben.	The settings could not be read and were reset ({fehler}); the old file is kept next to them as settings.json.bak.
 Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
+Dieser Diff hat {n} Zeilen.	This diff has {n} lines.
 Einstellungen	Settings
 Eltern	Parents
+Esc	Esc
 Filtern	Filter
 Für jede Autorin und jeden Autor geht ein Hash der E-Mail-Adresse an gravatar.com. Daran ist erkennbar, welche Personen in deinen Repositories vorkommen, auch in privaten. Bilder werden eine Woche lokal zwischengespeichert. Ohne diese Einstellung zeigt GitCraft Initialen und nimmt keine Verbindung auf.	For every author, a hash of their e-mail address is sent to gravatar.com. It shows which people appear in your repositories, private ones included. Images are cached locally for a week. Without this setting GitCraft shows initials and makes no connection.
+gekürzt	truncated
 gelöscht	deleted
 geändert	modified
 Git konnte nicht gestartet werden: {fehler}	Git could not be started: {fehler}
@@ -39,8 +44,10 @@ hinzugefügt	added
 jetzt	now
 Kein Repository geöffnet	No repository open
 kein Upstream	no upstream
+Kein Zeilenumbruch am Dateiende	No newline at end of file
 keine (erster Commit)	none (first commit)
 Keine Änderungen	No changes
+Keine Änderungen am Inhalt.	No changes to the content.
 Kommt mit Version {v}	Comes with version {v}
 Konflikt: beide gelöscht	conflict: both deleted
 Konflikt: beide geändert	conflict: both modified
@@ -53,11 +60,14 @@ Konflikte	Conflicts
 Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}	Conflicts {konflikte} · Staged {vorgemerkt} · Modified {geaendert} · Untracked {neu}
 Kopieren	Copy
 kopiert	copied
+Lade Diff …	Loading diff …
 Leeres Repository	Empty repository
 Lese Status …	Reading status …
 Lokal	Local
 Losgelöster HEAD bei {commit}	Detached HEAD at {commit}
+Modus {alt} -> {neu}	mode {alt} -> {neu}
 Nachricht kopieren	Copy message
+neue Datei	new file
 Nicht vorgemerkt	Not staged
 Nichts ausgewählt	Nothing selected
 Noch keine Commits und keine Dateien.	No commits and no files yet.
@@ -72,7 +82,9 @@ Rückgängig	Undo
 Stash	Stash
 Stashes	Stashes
 Status neu lesen	Read the status again
+Submodul	submodule
 Tags	Tags
+Trotzdem anzeigen	Show anyway
 umbenannt	renamed
 Unerwartete Ausgabe von git: {fehler}	Unexpected output from git: {fehler}
 Unversioniert	Untracked
@@ -82,10 +94,12 @@ Upstream {upstream} existiert nicht mehr	Upstream {upstream} no longer exists
 Vorgemerkt	Staged
 Wie das System	Like the system
 Wiederholen	Redo
+Zurück zum Graphen	Back to the graph
 {name}: Upstream {upstream} existiert nicht mehr	{name}: upstream {upstream} no longer exists
 {name}: {voraus} voraus, {zurueck} zurück gegenüber {upstream}	{name}: {voraus} ahead, {zurueck} behind {upstream}
 {n} Commits	{n} commits
 {n} Commits geladen …	{n} commits loaded …
+{n} Dateien geändert	{n} files changed
 {n} J.	{n} y
 {n} Min.	{n} min
 {n} Mon.	{n} mo
