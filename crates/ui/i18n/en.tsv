@@ -372,3 +372,49 @@ Eine URL (oder ihr Host) darf nicht mit „-“ beginnen.	A URL (or its host) mu
 Die URL enthält Steuerzeichen.	The URL contains control characters.
 Transport-Helfer („ext::“, „fd::“ …) können beliebige Programme starten; GitCraft nimmt sie nicht an.	Transport helpers (“ext::”, “fd::” …) can start any program; GitCraft does not accept them.
 GitCraft nimmt nur https, ssh, git, file und lokale Pfade an.	GitCraft accepts only https, ssh, git, file and local paths.
+1 Tag	1 tag
+Alle Remotes holen	Fetch all remotes
+Alle Remotes holen, ohne lokal etwas zu ändern (Rechtsklick: mit Aufräumen)	Fetch all remotes without changing anything local (right click: with pruning)
+Alle holen und aufräumen (Prune)	Fetch all and prune
+Anmeldung beim Remote fehlgeschlagen: {meldung}	Signing in to the remote failed: {meldung}
+Der Branch hat keinen Upstream	The branch has no upstream
+Der Branch hat keinen Upstream. Lege ihn in der Seitenleiste fest oder pushe den Branch zuerst.	The branch has no upstream. Set it in the sidebar or push the branch first.
+Der Pull hat Konflikte hinterlassen; Merge oder Rebase laufen noch. Löse die Konflikte in der Änderungsliste. ({meldung})	The pull left conflicts; the merge or rebase is still in progress. Resolve the conflicts in the change list. ({meldung})
+Entfernt Remote-Branches, deren Branch es auf dem Remote nicht mehr gibt.	Removes remote branches whose branch no longer exists on the remote.
+Fetch	Fetch
+Fetch alle Remotes	Fetch all remotes
+Fetch fertig: nichts Neues.	Fetch done: nothing new.
+Fetch fertig: {was}.	Fetch done: {was}.
+Fetch {name}	Fetch {name}
+Kein Remote eingerichtet	No remote set up
+Mergen	Merge
+Mergen: ein Merge-Commit verbindet beide Seiten (git pull --no-rebase). Rebasen: deine Commits werden auf {upstream} neu aufgesetzt und bekommen neue IDs (git pull --rebase).	Merge: a merge commit joins both sides (git pull --no-rebase). Rebase: your commits are replayed on top of {upstream} and get new IDs (git pull --rebase).
+Pull fertig.	Pull done.
+Pull: schon aktuell.	Pull: already up to date.
+Rebasen	Rebase
+Remote: {phase}	Remote: {phase}
+Upstream holen und vorspulen (Rechtsklick: Merge oder Rebase)	Fetch the upstream and fast-forward (right click: merge or rebase)
+Vorspulen ist nicht möglich (eigene Commits: {eigene}, neue vom Remote: {neue}). Wähle Merge oder Rebase.	Fast-forward is not possible (own commits: {eigene}, new from the remote: {neue}). Choose merge or rebase.
+verbinde …	connecting …
+{branch} und {upstream} sind auseinandergelaufen (eigene Commits: {eigene}, neue vom Remote: {neue}). Nichts wurde geändert.	{branch} and {upstream} have diverged (own commits: {eigene}, new from the remote: {neue}). Nothing was changed.
+{name} +1 Commit	{name} +1 commit
+{name} +{n} Commits	{name} +{n} commits
+{name} aktualisiert	{name} updated
+{name} entfernt	{name} removed
+{name} neu	{name} new
+{name} neu geschrieben	{name} rewritten
+{n} Tags	{n} tags
+{n} weitere Branches	{n} more branches
+Vorspulen nicht möglich	Fast-forward not possible
+Pull (nur Vorspulen)	Pull (fast-forward only)
+Pull mit Merge	Pull with merge
+Pull mit Rebase	Pull with rebase
+Objekte aufzählen	Enumerating objects
+Objekte zählen	Counting objects
+Objekte komprimieren	Compressing objects
+Objekte empfangen	Receiving objects
+Objekte entpacken	Unpacking objects
+Deltas auflösen	Resolving deltas
+Objekte senden	Writing objects
+Dateien aktualisieren	Updating files
+Dateien auschecken	Checking out files

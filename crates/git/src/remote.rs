@@ -243,7 +243,7 @@ impl Repository {
         Ok(parse_remotes(&out))
     }
 
-    fn remote_name_ok(&self, name: &str) -> Result<(), GitError> {
+    pub(crate) fn remote_name_ok(&self, name: &str) -> Result<(), GitError> {
         let problem = if name.is_empty() {
             Some(NameProblem::Empty)
         } else if name.starts_with('-') {

@@ -50,6 +50,16 @@ pub enum GitError {
         url: String,
         problem: crate::UrlProblem,
     },
+    /// The current branch has no upstream to pull from or compare with.
+    NoUpstream,
+    /// A fast-forward is not possible: both sides have commits of their own.
+    Diverged { ahead: u32, behind: u32 },
+    /// A pull stopped with conflicts; the merge or rebase is in progress (git's report,
+    /// credentials hidden).
+    MergeConflicts(String),
+    /// The remote refused the login or none could be given (git's report, credentials
+    /// hidden).
+    Auth(String),
     /// No credential helper is configured to hand credentials to.
     NoCredentialHelper,
     /// A switch would overwrite local changes in these files; nothing was changed.
@@ -116,6 +126,13 @@ impl fmt::Display for GitError {
             GitError::InvalidUrl { url, problem } => {
                 write!(f, "invalid remote URL {url:?} ({problem:?})")
             }
+            GitError::NoUpstream => write!(f, "the current branch has no upstream"),
+            GitError::Diverged { ahead, behind } => write!(
+                f,
+                "the branch and its upstream have diverged ({ahead} ahead, {behind} behind)"
+            ),
+            GitError::MergeConflicts(_) => write!(f, "the pull stopped with conflicts"),
+            GitError::Auth(e) => write!(f, "authentication failed: {e}"),
             GitError::NoCredentialHelper => write!(f, "no credential helper is configured"),
             GitError::UnsafePath(p) => write!(f, "refused path {p}"),
             GitError::Stale => write!(f, "the file changed since its diff was shown"),

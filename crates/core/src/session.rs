@@ -5,11 +5,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, Comparison, Discarded, FileDiff, GitError, GitRunner,
-    HeadPos, Identity, LogReader, Loss, Oid, Ref, Remote, RepoPath, Repository, SearchKind,
-    SearchStream, Stash, Status, TrustReport, Written,
+    HeadPos, Identity, LogReader, Loss, Oid, OnProgress, Progress, PullMode, Ref, RefUpdate,
+    Remote, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -209,6 +210,15 @@ pub enum Command {
     /// Hand passwords in the remote's URLs to the credential helper and take them out of the
     /// URLs (`credential approve`, `remote set-url`).
     MoveCredentials(String),
+    /// Fetch one remote or all (`fetch --progress [--prune] (--all | <remote>)`); progress
+    /// arrives as [`Event::Progress`].
+    Fetch {
+        remote: Option<String>,
+        prune: bool,
+    },
+    /// Pull the upstream of the current branch the chosen way (`pull --progress
+    /// --no-rebase --ff-only | --no-rebase --ff --no-edit | --rebase`).
+    Pull(PullMode),
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -291,6 +301,8 @@ impl Command {
             | Command::RemoveRemote(_)
             | Command::SetRemoteUrls { .. }
             | Command::MoveCredentials(_)
+            | Command::Fetch { .. }
+            | Command::Pull(_)
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -352,6 +364,14 @@ pub enum Outcome {
     /// A tag was created; the object its ref points to.
     Tagged(Oid),
     Commit(Box<Commit>),
+    /// What a fetch changed.
+    Fetched(Vec<RefUpdate>),
+    /// A pull ended: HEAD before and after.
+    Pulled {
+        output: Written,
+        before: Option<Oid>,
+        after: Option<Oid>,
+    },
     /// A remote was removed; what it was.
     RemoteRemoved(Remote),
     Comparison(Box<Comparison>),
@@ -368,6 +388,8 @@ pub enum Event {
         command: Command,
         result: Result<Outcome, GitError>,
     },
+    /// A running command reports how far it is (fetch, pull); at most a few per second.
+    Progress { id: OperationId, progress: Progress },
 }
 
 /// State shared with the worker threads.
@@ -384,6 +406,32 @@ struct Shared {
 }
 
 impl Shared {
+    /// Sends progress of `id` as events, thinned out: a new phase and the end of a phase
+    /// always, otherwise at most every 50 ms.
+    fn progress(self: &Arc<Self>, id: OperationId) -> OnProgress {
+        let shared = Arc::clone(self);
+        let last: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+        Arc::new(move |progress: Progress| {
+            let Ok(mut last) = last.lock() else {
+                return;
+            };
+            let now = Instant::now();
+            let send = match &*last {
+                Some((phase, at)) => {
+                    *phase != progress.phase
+                        || Some(progress.done) == progress.total
+                        || now.duration_since(*at) >= Duration::from_millis(50)
+                }
+                None => true,
+            };
+            if send {
+                *last = Some((progress.phase.clone(), now));
+                let _ = shared.events.send(Event::Progress { id, progress });
+                (shared.wake)();
+            }
+        })
+    }
+
     fn begin(&self, command: &Command) -> OperationId {
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(slot) = command.slot() {
@@ -467,7 +515,7 @@ impl RepoSession {
                 // Ends when the session is dropped (the sender goes away).
                 while let Ok((id, command, cancel)) = queue.recv() {
                     let result = if worker.trusted.load(Ordering::SeqCst) {
-                        run(&worker_repo, &command, &cancel)
+                        run(&worker_repo, &command, &cancel, worker.progress(id))
                     } else {
                         Err(GitError::NotTrusted)
                     };
@@ -476,7 +524,7 @@ impl RepoSession {
                     let refresh = Command::Refresh;
                     let rid = worker.begin(&refresh);
                     worker.finish(id, command, result);
-                    let result = run(&worker_repo, &refresh, &Cancel::new());
+                    let result = run(&worker_repo, &refresh, &Cancel::new(), quiet());
                     worker.finish(rid, refresh, result);
                 }
             })
@@ -540,7 +588,7 @@ impl RepoSession {
         let started = std::thread::Builder::new()
             .name("gitcraft-read".into())
             .spawn(move || {
-                let result = run(&repo, &job, &Cancel::new());
+                let result = run(&repo, &job, &Cancel::new(), quiet());
                 shared.finish(id, job, result);
             });
         if let Err(e) = started {
@@ -598,8 +646,18 @@ impl Reader {
     }
 }
 
+/// For commands that report no progress.
+fn quiet() -> OnProgress {
+    Arc::new(|_| {})
+}
+
 /// Runs one command (on the calling thread).
-fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome, GitError> {
+fn run(
+    repo: &Repository,
+    command: &Command,
+    cancel: &Cancel,
+    on_progress: OnProgress,
+) -> Result<Outcome, GitError> {
     Ok(match command {
         Command::Refresh => Outcome::Refreshed(Arc::new(Snapshot::read(repo)?)),
         Command::CommitDetails(commit) => Outcome::CommitDetails {
@@ -734,6 +792,18 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         Command::MoveCredentials(name) => {
             repo.move_credentials(name, cancel)?;
             Outcome::Written(Written::default())
+        }
+        Command::Fetch { remote, prune } => {
+            Outcome::Fetched(repo.fetch(remote.as_deref(), *prune, cancel, on_progress)?)
+        }
+        Command::Pull(mode) => {
+            let before = repo.head_commit()?;
+            let output = repo.pull(*mode, cancel, on_progress)?;
+            Outcome::Pulled {
+                output,
+                before,
+                after: repo.head_commit()?,
+            }
         }
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {

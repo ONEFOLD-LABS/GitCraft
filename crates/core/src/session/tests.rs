@@ -221,8 +221,9 @@ fn superseded_reads_are_dropped() {
     let got = settle(&session);
     let ids: Vec<OperationId> = got
         .iter()
-        .map(|e| match e {
-            Event::Finished { id, .. } => *id,
+        .filter_map(|e| match e {
+            Event::Finished { id, .. } => Some(*id),
+            Event::Progress { .. } => None,
         })
         .collect();
     assert_eq!(ids, [newer]);
@@ -333,4 +334,54 @@ fn commit_through_the_queue() {
         e,
         Event::Finished { result: Ok(Outcome::Identity(i)), .. } if i.is_complete()
     )));
+}
+
+/// A fetch reports progress while it runs and what changed at the end.
+#[test]
+fn fetch_reports_progress_and_changes() {
+    let f = Fixture::new();
+    // The remote: another repository with a few commits.
+    let up = f.tmp.path().join("up");
+    std::fs::create_dir(&up).unwrap();
+    let git_up = |args: &[&str]| {
+        let out = Process::new("git")
+            .current_dir(&up)
+            .env("GIT_CONFIG_GLOBAL", f.config())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@invalid")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@invalid")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    };
+    git_up(&["init", "-q", "-b", "main"]);
+    for i in 0..20 {
+        std::fs::write(up.join(format!("f{i}")), format!("{i}").repeat(1000)).unwrap();
+        git_up(&["add", "-A"]);
+        git_up(&["commit", "-q", "-m", &format!("c{i}")]);
+    }
+    f.git(&["remote", "add", "origin", up.to_str().unwrap()]);
+    let session = f.open();
+    session.submit(Command::Fetch {
+        remote: Some("origin".into()),
+        prune: false,
+    });
+    let got = settle(&session);
+    assert!(
+        got.iter().any(|e| matches!(e, Event::Progress { .. })),
+        "{got:?}"
+    );
+    let fetched = got.iter().find_map(|e| match e {
+        Event::Finished {
+            result: Ok(Outcome::Fetched(u)),
+            ..
+        } => Some(u.clone()),
+        _ => None,
+    });
+    let updates = fetched.expect("fetch finished");
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].name, "origin/main");
 }

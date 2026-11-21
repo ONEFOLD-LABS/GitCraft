@@ -4,6 +4,7 @@
 
 use egui::RichText;
 use gitcraft_core::Command;
+use gitcraft_git::PullMode;
 use gitcraft_git::{UrlProblem, check_url, escape, redact_url};
 
 use crate::branches::{Decision, name_hint};
@@ -34,6 +35,13 @@ pub(crate) enum Dialog {
     /// Move the password in the URL into the credential helper.
     MoveCredentials {
         name: String,
+    },
+    /// A fast-forward pull is not possible; merge or rebase must be chosen.
+    Diverged {
+        branch: String,
+        upstream: String,
+        ahead: u32,
+        behind: u32,
     },
 }
 
@@ -80,6 +88,7 @@ impl Dialog {
             Dialog::Rename { .. } => "Remote umbenennen",
             Dialog::Remove { .. } => "Remote entfernen?",
             Dialog::MoveCredentials { .. } => "Zugangsdaten aus der URL nehmen",
+            Dialog::Diverged { .. } => "Vorspulen nicht möglich",
         }
     }
 
@@ -251,6 +260,39 @@ impl Dialog {
                 ui.horizontal(|ui| {
                     if ui.button(tr("Verschieben")).clicked() {
                         decision = Decision::Run(Command::MoveCredentials(name.clone()));
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::Diverged {
+                branch,
+                upstream,
+                ahead,
+                behind,
+            } => {
+                let (branch, upstream) = (escape(branch), escape(upstream));
+                ui.label(trf(
+                    "{branch} und {upstream} sind auseinandergelaufen (eigene Commits: {eigene}, neue vom Remote: {neue}). Nichts wurde geändert.",
+                    &[
+                        ("branch", &branch),
+                        ("upstream", &upstream),
+                        ("eigene", ahead),
+                        ("neue", behind),
+                    ],
+                ));
+                ui.add_space(4.0);
+                ui.label(trf(
+                    "Mergen: ein Merge-Commit verbindet beide Seiten (git pull --no-rebase). Rebasen: deine Commits werden auf {upstream} neu aufgesetzt und bekommen neue IDs (git pull --rebase).",
+                    &[("upstream", &upstream)],
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Mergen")).clicked() {
+                        decision = Decision::Run(Command::Pull(PullMode::Merge));
+                    }
+                    if ui.button(tr("Rebasen")).clicked() {
+                        decision = Decision::Run(Command::Pull(PullMode::Rebase));
                     }
                     if ui.button(tr("Abbrechen")).clicked() {
                         decision = Decision::Close;

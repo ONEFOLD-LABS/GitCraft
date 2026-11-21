@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::GitError;
 use crate::command_log::{CommandLog, LogEntry};
+use crate::progress::{OnProgress, Progress};
 
 /// Oldest git GitCraft supports (porcelain v2 status with all fields used here, `init -b`).
 pub const MIN_VERSION: GitVersion = GitVersion {
@@ -195,7 +196,7 @@ impl GitRunner {
         S: AsRef<OsStr>,
     {
         let (child, call) = self.spawn(cwd, config, args, Mode::Read, false, &[])?;
-        collect(child, &call, None, Some(READ_TIMEOUT), None).map(|(out, _)| out)
+        collect(child, &call, None, Some(READ_TIMEOUT), None, None).map(|(out, _)| out)
     }
 
     /// Runs a git command that changes the repository. `input` is written to git's stdin (path
@@ -241,6 +242,41 @@ impl GitRunner {
             input.map(<[u8]>::to_vec),
             None,
             Some(cancel.clone()),
+            None,
+        )?;
+        Ok(Written {
+            stdout,
+            stderr: String::from_utf8_lossy(&stderr).trim_end().to_owned(),
+        })
+    }
+
+    /// Like [`GitRunner::write`] for commands that report progress on stderr (`--progress`):
+    /// each report goes to `on_progress` as it arrives; the other lines are kept as git's
+    /// message.
+    pub(crate) fn write_progress<I, S>(
+        &self,
+        cwd: &Path,
+        config: &[String],
+        args: I,
+        cancel: &Cancel,
+        on_progress: OnProgress,
+        env: &[(&str, &OsStr)],
+    ) -> Result<Written, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancel.is_cancelled() {
+            return Err(GitError::Cancelled);
+        }
+        let (child, call) = self.spawn(cwd, config, args, Mode::Write, false, env)?;
+        let (stdout, stderr) = collect(
+            child,
+            &call,
+            None,
+            None,
+            Some(cancel.clone()),
+            Some(on_progress),
         )?;
         Ok(Written {
             stdout,
@@ -448,6 +484,7 @@ fn collect(
     input: Option<Vec<u8>>,
     timeout: Option<Duration>,
     cancel: Option<Cancel>,
+    on_progress: Option<OnProgress>,
 ) -> Result<(Vec<u8>, Vec<u8>), GitError> {
     let feeder = match (child.stdin.take(), input) {
         (Some(mut pipe), Some(bytes)) => Some(std::thread::spawn(move || {
@@ -487,7 +524,7 @@ fn collect(
             return stop;
         }
     });
-    let result = collect_pipes(&child, stdout_pipe, stderr_pipe);
+    let result = collect_pipes(&child, stdout_pipe, stderr_pipe, on_progress);
     let _ = done.send(());
     let stop = watchdog.join().unwrap_or(Stop::Ended);
     if let Some(f) = feeder {
@@ -530,6 +567,7 @@ fn collect_pipes(
     child: &Mutex<Watched>,
     stdout_pipe: Option<std::process::ChildStdout>,
     stderr_pipe: Option<std::process::ChildStderr>,
+    on_progress: Option<OnProgress>,
 ) -> Result<Collected, GitError> {
     let kill = || {
         if let Ok(mut c) = child.lock() {
@@ -538,7 +576,12 @@ fn collect_pipes(
             c.reaped = true;
         }
     };
-    let stderr_reader = stderr_pipe.map(|err| std::thread::spawn(move || drain(err)));
+    let stderr_reader = stderr_pipe.map(|err| {
+        std::thread::spawn(move || match on_progress {
+            Some(report) => drain_progress(err, &report),
+            None => drain(err),
+        })
+    });
     let mut stdout = Vec::new();
     let mut too_large = false;
     if let Some(out) = stdout_pipe {
@@ -595,6 +638,44 @@ fn drain(mut pipe: impl Read) -> Vec<u8> {
         let room = MAX_STDERR.saturating_sub(kept.len());
         kept.extend_from_slice(&buf[..n.min(room)]);
     }
+    kept
+}
+
+/// Reads stderr line by line (lines end with `\r` or `\n`), hands progress reports to
+/// `report` and keeps the other lines (at most [`MAX_STDERR`] bytes), so that a long progress
+/// display never pushes git's actual message out.
+fn drain_progress(mut pipe: impl Read, report: &OnProgress) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut line = Vec::new();
+    let mut buf = [0u8; 4096];
+    let take = |line: &mut Vec<u8>, kept: &mut Vec<u8>| {
+        let text = String::from_utf8_lossy(line);
+        match Progress::parse(&text) {
+            Some(p) => report(p),
+            None if !text.trim().is_empty() => {
+                let room = MAX_STDERR.saturating_sub(kept.len());
+                kept.extend_from_slice(&line[..line.len().min(room)]);
+                if kept.len() < MAX_STDERR {
+                    kept.push(b'\n');
+                }
+            }
+            None => {}
+        }
+        line.clear();
+    };
+    while let Ok(n) = pipe.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                take(&mut line, &mut kept);
+            } else if line.len() < MAX_STDERR {
+                line.push(b);
+            }
+        }
+    }
+    take(&mut line, &mut kept);
     kept
 }
 
@@ -740,6 +821,7 @@ mod tests {
             None,
             Some(Duration::from_millis(200)),
             None,
+            None,
         );
         assert!(matches!(r, Err(GitError::TimedOut { .. })), "{r:?}");
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -781,9 +863,34 @@ mod tests {
             later.cancel();
         });
         let start = std::time::Instant::now();
-        let r = collect(child, &Call::bare("sh"), None, None, Some(cancel));
+        let r = collect(child, &Call::bare("sh"), None, None, Some(cancel), None);
         assert_eq!(r, Err(GitError::Cancelled));
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn progress_is_reported_and_kept_out_of_the_message() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let report: OnProgress = Arc::new(move |p| {
+            if let Ok(mut s) = sink.lock() {
+                s.push((p.phase, p.done));
+            }
+        });
+        let mut input: Vec<u8> = Vec::new();
+        for i in 0..5000 {
+            input.extend_from_slice(
+                format!("Receiving objects: {}% ({i}/5000)\r", i / 50).as_bytes(),
+            );
+        }
+        input.extend_from_slice(
+            b"Receiving objects: 100% (5000/5000), done.\nfatal: the real reason\n",
+        );
+        let kept = drain_progress(&input[..], &report);
+        assert_eq!(String::from_utf8_lossy(&kept), "fatal: the real reason\n");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 5001);
+        assert_eq!(seen.last(), Some(&("Receiving objects".to_owned(), 5000)));
     }
 
     #[test]

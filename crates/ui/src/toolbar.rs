@@ -11,6 +11,7 @@ use crate::theme::Tokens;
 pub(crate) enum Icon {
     Undo,
     Redo,
+    Fetch,
     Pull,
     Push,
     Branch,
@@ -21,9 +22,10 @@ pub(crate) enum Icon {
 }
 
 /// An action of the toolbar and the version that brings it.
-pub(crate) const ACTIONS: [(Icon, &str, &str); 7] = [
+pub(crate) const ACTIONS: [(Icon, &str, &str); 8] = [
     (Icon::Undo, "Rückgängig", "0.4"),
     (Icon::Redo, "Wiederholen", "0.4"),
+    (Icon::Fetch, "Fetch", "0.5"),
     (Icon::Pull, "Pull", "0.5"),
     (Icon::Push, "Push", "0.5"),
     (Icon::Branch, "Branch", "0.4"),
@@ -101,13 +103,15 @@ pub(crate) fn button(
 /// The action buttons. `known` lists the actions that exist: whether they can run now and their
 /// tooltip (what they would do, or why not). The others are disabled with the version that
 /// brings them in the tooltip. Pull and Push show how many commits the current branch is behind
-/// and ahead of its upstream. Returns the clicked action.
+/// and ahead of its upstream. `each` sees every button's response (for context menus).
+/// Returns the clicked action.
 pub(crate) fn actions(
     ui: &mut egui::Ui,
     t: &Tokens,
     behind: u32,
     ahead: u32,
     known: &[(Icon, bool, String)],
+    each: &mut dyn FnMut(Icon, &egui::Response),
 ) -> Option<Icon> {
     let mut clicked = None;
     for (icon, label, version) in ACTIONS {
@@ -142,6 +146,7 @@ pub(crate) fn actions(
         if resp.clicked() {
             clicked = Some(icon);
         }
+        each(icon, &resp);
     }
     clicked
 }
@@ -163,6 +168,20 @@ fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
         Icon::Redo => {
             poly(&[(-7.0, 6.0), (-7.0, -1.0), (6.0, -1.0)]);
             poly(&[(2.0, -5.0), (6.0, -1.0), (2.0, 3.0)]);
+        }
+        Icon::Fetch => {
+            // An arrow coming down out of a circle: get, without changing anything local.
+            p.add(egui::Shape::Path(egui::epaint::PathShape::line(
+                (0..=12)
+                    .map(|k| {
+                        let a = std::f32::consts::PI * (0.25 + 1.5 * k as f32 / 12.0) + 0.0;
+                        at(7.0 * a.cos(), -1.0 - 7.0 * a.sin())
+                    })
+                    .collect(),
+                s,
+            )));
+            poly(&[(0.0, -4.0), (0.0, 8.0)]);
+            poly(&[(-3.5, 4.5), (0.0, 8.0), (3.5, 4.5)]);
         }
         Icon::Pull => {
             poly(&[(0.0, -8.0), (0.0, 4.0)]);
