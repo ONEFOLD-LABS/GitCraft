@@ -7,6 +7,7 @@
 //! - [`Repository`] is an opened working tree: [`Repository::status`], [`Repository::refs`],
 //!   [`Repository::stashes`], and [`Repository::log`] for the history in pages.
 
+mod branch;
 mod command_log;
 mod diff;
 mod discard;
@@ -21,6 +22,7 @@ mod runner;
 mod status;
 mod trust;
 
+pub use branch::{Loss, LostCommit, NameProblem};
 pub use command_log::{CommandLog, LogEntry, redact};
 pub use diff::{ChangedFile, FileDiff, FileStatus, Hunk, Line, LineKind, MAX_LINES};
 pub use discard::{DISCARDED_REFS, Discarded};

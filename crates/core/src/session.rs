@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, Discarded, FileDiff, GitError, GitRunner, Identity,
-    LogReader, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport,
-    Written,
+    LogReader, Loss, Oid, Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status,
+    TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -102,6 +102,27 @@ pub enum Command {
     PruneDiscarded(i64),
     /// Added plus removed unstaged lines of files (`diff --numstat`), for a confirmation.
     CountLines(Vec<RepoPath>),
+    /// Create a branch at a commit or ref, optionally switching to it (`branch` /
+    /// `switch -c`).
+    CreateBranch {
+        name: String,
+        start: String,
+        checkout: bool,
+    },
+    /// Switch to a local branch (`switch --no-guess`).
+    SwitchBranch(String),
+    /// Check out a commit without a branch (`switch --detach`).
+    SwitchDetached(Oid),
+    RenameBranch {
+        old: String,
+        new: String,
+    },
+    /// Delete a local branch after the user saw what it alone holds (`branch -D`).
+    DeleteBranch(String),
+    /// Commits only this branch holds (`log <branch> --not …`).
+    BranchLoss(String),
+    /// Commits only the detached HEAD holds.
+    DetachedLoss,
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
     /// [--no-verify]`, message on stdin).
     Commit {
@@ -133,7 +154,8 @@ const IDENTITY: usize = 3;
 const AMEND: usize = 4;
 const DISCARDED: usize = 5;
 const COUNT: usize = 6;
-const SLOTS: usize = 7;
+const LOSS: usize = 7;
+const SLOTS: usize = 8;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
@@ -145,7 +167,9 @@ impl Command {
             | Command::Identity
             | Command::AmendInfo
             | Command::ListDiscarded
-            | Command::CountLines(_) => false,
+            | Command::CountLines(_)
+            | Command::BranchLoss(_)
+            | Command::DetachedLoss => false,
             Command::Stage(_)
             | Command::StageAll
             | Command::Unstage(_)
@@ -156,6 +180,11 @@ impl Command {
             | Command::DeleteUntracked(_)
             | Command::RestoreDiscarded(_)
             | Command::PruneDiscarded(_)
+            | Command::CreateBranch { .. }
+            | Command::SwitchBranch(_)
+            | Command::SwitchDetached(_)
+            | Command::RenameBranch { .. }
+            | Command::DeleteBranch(_)
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -172,6 +201,7 @@ impl Command {
             Command::AmendInfo => Some(AMEND),
             Command::ListDiscarded => Some(DISCARDED),
             Command::CountLines(_) => Some(COUNT),
+            Command::BranchLoss(_) | Command::DetachedLoss => Some(LOSS),
             _ => None,
         }
     }
@@ -193,6 +223,9 @@ pub enum Outcome {
     Saved(String),
     Discarded(Vec<Discarded>),
     Lines(u64),
+    Loss(Loss),
+    /// A branch was deleted; the commit it pointed to.
+    Deleted(Oid),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
 }
@@ -476,6 +509,19 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
             Outcome::Written(Written::default())
         }
         Command::CountLines(paths) => Outcome::Lines(repo.unstaged_lines(paths)?),
+        Command::CreateBranch {
+            name,
+            start,
+            checkout,
+        } => Outcome::Written(repo.create_branch(name, start, *checkout, cancel)?),
+        Command::SwitchBranch(name) => Outcome::Written(repo.switch_branch(name, cancel)?),
+        Command::SwitchDetached(id) => Outcome::Written(repo.switch_detached(id, cancel)?),
+        Command::RenameBranch { old, new } => {
+            Outcome::Written(repo.rename_branch(old, new, cancel)?)
+        }
+        Command::DeleteBranch(name) => Outcome::Deleted(repo.delete_branch(name, cancel)?),
+        Command::BranchLoss(name) => Outcome::Loss(repo.branch_loss(name)?),
+        Command::DetachedLoss => Outcome::Loss(repo.detached_loss()?),
         Command::Commit {
             message,
             amend,

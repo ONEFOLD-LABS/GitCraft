@@ -234,3 +234,40 @@ Von GitCraft beendet (abgebrochen, Zeitlimit oder nicht mehr gebraucht)	Stopped 
 Befehl kopieren	Copy command
 Mit Verzeichniswechsel kopieren	Copy with change of directory
 Befehlsprotokoll ein/aus	Show or hide the command log
+Anlegen	Create
+Auschecken	Check out
+Beginnt bei {start}.	Starts at {start}.
+Branch hier anlegen …	Create branch here …
+Branch {name} gelöscht (Spitze {id}).	Branch {name} deleted (tip {id}).
+Checkt {commit} aus, ohne Branch.	Checks out {commit} without a branch.
+Committe die Änderungen, lege sie in einen Stash oder verwirf sie, dann wechsle erneut.	Commit the changes, stash them or discard them, then switch again.
+Danach auschecken	Check it out afterwards
+Der Name fehlt.	The name is missing.
+Der Wechsel würde lokale Änderungen an diesen Dateien überschreiben; es wurde nichts geändert:	Switching would overwrite local changes to these files; nothing was changed:
+Der Wechsel würde lokale Änderungen überschreiben: {dateien}	Switching would overwrite local changes: {dateien}
+Diesen Commit auschecken …	Check out this commit …
+Du siehst dann diesen Stand („losgelöster HEAD“). Neue Commits gehören zu keinem Branch, bis du einen anlegst.	You then look at this state ("detached HEAD"). New commits belong to no branch until you create one.
+Ein Name darf keine Leerzeichen enthalten.	A name must not contain spaces.
+Ein Name darf nicht mit „-“ beginnen.	A name must not start with "-".
+Git erlaubt den Namen nicht (zum Beispiel „..“, „~“, „^“, „:“, „?“, „*“, „[“ oder ein Ende auf „.lock“ oder „/“).	Git does not allow the name (for example "..", "~", "^", ":", "?", "*", "[" or an ending in ".lock" or "/").
+GitCraft merkt sich die Spitze; „Wiederherstellen“ legt den Branch danach wieder an.	GitCraft remembers the tip; "Restore" creates the branch again afterwards.
+HEAD ist losgelöst und hält {n} Commits, die auf keinem Branch liegen. Nach dem Wechsel sind sie nur noch über ihre ID erreichbar:	HEAD is detached and holds {n} commits that are on no branch. After switching they can only be reached by their ID:
+Losgelöster HEAD bei {commit}: neue Commits gehören zu keinem Branch.	Detached HEAD at {commit}: new commits belong to no branch.
+Löscht den Branch {name} mit {n} Commits, die auf keinem anderen Branch liegen:	Deletes the branch {name} with {n} commits that are on no other branch:
+Löscht den Branch {name}. Seine Commits bleiben auf anderen Branches erhalten.	Deletes the branch {name}. Its commits remain on other branches.
+Neuer Name für {name}:	New name for {name}:
+Prüfe, ob Commits verloren gingen …	Checking whether commits would be lost …
+Prüfe, welche Commits nur auf diesem Branch liegen …	Checking which commits are only on this branch …
+Trotzdem wechseln	Switch anyway
+Umbenennen	Rename
+Umbenennen …	Rename …
+Ungültiger Name {name}: {grund}	Invalid name {name}: {grund}
+Neuer Branch	New branch
+Branch umbenennen	Rename branch
+Branch löschen?	Delete branch?
+Commit auschecken?	Check out commit?
+Commits würden unerreichbar	Commits would become unreachable
+Wechsel nicht möglich	Cannot switch
+Der Name ist unverändert.	The name is unchanged.
+Löscht den Branch {name} mit 1 Commit, der auf keinem anderen Branch liegt:	Deletes the branch {name} with 1 commit that is on no other branch:
+HEAD ist losgelöst und hält 1 Commit, der auf keinem Branch liegt. Nach dem Wechsel ist er nur noch über seine ID erreichbar:	HEAD is detached and holds 1 commit that is on no branch. After switching it can only be reached by its ID:

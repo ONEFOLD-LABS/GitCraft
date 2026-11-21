@@ -40,6 +40,13 @@ pub enum GitError {
     UnsafePath(String),
     /// The file changed since its diff was shown; nothing was applied.
     Stale,
+    /// A branch or tag name GitCraft or git refuses.
+    InvalidName {
+        name: String,
+        problem: crate::NameProblem,
+    },
+    /// A switch would overwrite local changes in these files; nothing was changed.
+    WouldOverwrite(Vec<String>),
     /// The user cancelled the call; git and what it started were stopped.
     Cancelled,
     /// The repository's configuration names a program in a way GitCraft cannot switch off.
@@ -85,6 +92,14 @@ impl fmt::Display for GitError {
                 )
             }
             GitError::Cancelled => write!(f, "cancelled"),
+            GitError::InvalidName { name, problem } => {
+                write!(f, "invalid name {name:?} ({problem:?})")
+            }
+            GitError::WouldOverwrite(files) => write!(
+                f,
+                "switching would overwrite local changes in {}",
+                files.join(", ")
+            ),
             GitError::UnsafePath(p) => write!(f, "refused path {p}"),
             GitError::Stale => write!(f, "the file changed since its diff was shown"),
             GitError::InvalidValue(v) => write!(f, "invalid value {v:?}"),
