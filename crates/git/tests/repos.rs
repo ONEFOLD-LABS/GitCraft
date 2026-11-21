@@ -695,3 +695,82 @@ fn repository_filters_cannot_run_on_diff() {
         "GitCraft must not run the repository's filter on diff"
     );
 }
+
+#[test]
+fn history_search() {
+    use gitcraft_git::SearchKind::*;
+    let f = Fixture::new();
+    f.write("src/a.rs", "fn a() {}\n");
+    f.commit_all("Parser anlegen");
+    f.write("docs/plan.md", "Plan\n");
+    f.commit_all("Plan schreiben (v1.*)");
+    f.write("src/a.rs", "fn a() { let geheim = 42; }\n");
+    f.commit_all("--all ist kein Schalter");
+    let out = f
+        .command(&f.repo())
+        .args(["commit", "-q", "--allow-empty", "-m", "Leerer Commit"])
+        .env("GIT_AUTHOR_NAME", "Zoe Andere")
+        .env("GIT_AUTHOR_EMAIL", "zoe@invalid")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let repo = f.open();
+    let all = all_commits(&repo);
+    let subject =
+        |id: &gitcraft_git::Oid| all.iter().find(|c| &c.id == id).unwrap().subject.clone();
+    let find = |kind, text: &str| -> Vec<String> {
+        let mut s = repo.search(kind, text).unwrap();
+        let mut ids = Vec::new();
+        loop {
+            let batch = s.next_batch(2).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            ids.extend(batch);
+        }
+        assert!(s.is_done());
+        let mut subjects: Vec<String> = ids.iter().map(subject).collect();
+        subjects.sort();
+        subjects
+    };
+    assert_eq!(
+        find(Message, "PARSER"),
+        ["Parser anlegen"],
+        "case-insensitive"
+    );
+    assert_eq!(
+        find(Message, "(v1.*)"),
+        ["Plan schreiben (v1.*)"],
+        "literal, not a regex"
+    );
+    assert_eq!(find(Message, "v1.+"), Vec::<String>::new());
+    assert_eq!(
+        find(Message, "--all"),
+        ["--all ist kein Schalter"],
+        "text is not an option"
+    );
+    assert_eq!(find(Author, "zoe"), ["Leerer Commit"]);
+    assert_eq!(
+        find(Path, "src"),
+        ["--all ist kein Schalter", "Parser anlegen"]
+    );
+    assert_eq!(find(Path, "docs/plan.md"), ["Plan schreiben (v1.*)"]);
+    assert_eq!(find(Content, "geheim"), ["--all ist kein Schalter"]);
+    assert_eq!(
+        find(Content, "-S"),
+        Vec::<String>::new(),
+        "a leading dash stays text"
+    );
+}
+
+#[test]
+fn search_in_an_empty_repository_finds_nothing() {
+    let f = Fixture::new();
+    let mut s = f
+        .open()
+        .search(gitcraft_git::SearchKind::Message, "x")
+        .unwrap();
+    assert!(s.next_batch(10).unwrap().is_empty());
+    assert!(s.is_done());
+}

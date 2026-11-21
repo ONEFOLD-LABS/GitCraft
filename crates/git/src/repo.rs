@@ -4,7 +4,7 @@ use crate::diff::{ChangedFile, FileDiff, parse_name_status, parse_numstat, whole
 use crate::log::{FORMAT, LogReader};
 use crate::path::bytes_to_path;
 use crate::refs::{REF_FORMAT, STASH_FORMAT};
-use crate::{Commit, GitError, GitRunner, Ref, RepoPath, Stash, Status};
+use crate::{Commit, GitError, GitRunner, Oid, Ref, RepoPath, Stash, Status};
 use std::ffi::OsString;
 
 /// An opened Git working tree.
@@ -256,6 +256,27 @@ impl Repository {
     /// order, newest first, read in pages from one running `git log`. Empty for a repository
     /// without commits.
     pub fn log(&self) -> Result<LogReader, GitError> {
+        let Some(revisions) = self.revisions()? else {
+            return Ok(LogReader::new(None));
+        };
+        let mut args: Vec<OsString> = [
+            "log",
+            "-z",
+            "--topo-order",
+            "--no-color",
+            "--decorate=no",
+            FORMAT,
+        ]
+        .map(OsString::from)
+        .to_vec();
+        args.extend(revisions);
+        let stream = self.runner.stream(&self.workdir, &self.read_config, args)?;
+        Ok(LogReader::new(Some(stream)))
+    }
+
+    /// The revisions the history shows: all branches, remote branches and tags, and HEAD when
+    /// it points at a commit. `None` for a repository without any commit.
+    fn revisions(&self) -> Result<Option<Vec<OsString>>, GitError> {
         let head = match self.runner.read_with(
             &self.workdir,
             &self.read_config,
@@ -266,24 +287,104 @@ impl Repository {
             Err(e) => return Err(e),
         };
         if !head && self.refs()?.is_empty() {
-            return Ok(LogReader::new(None));
+            return Ok(None);
         }
-        let mut args = vec![
-            "log",
-            "-z",
-            "--topo-order",
-            "--no-color",
-            "--decorate=no",
-            FORMAT,
-            "--branches",
-            "--remotes",
-            "--tags",
-        ];
+        let mut args: Vec<OsString> = ["--branches", "--remotes", "--tags"]
+            .map(OsString::from)
+            .to_vec();
         if head {
-            args.push("HEAD");
+            args.push("HEAD".into());
+        }
+        Ok(Some(args))
+    }
+
+    /// Commits of the history that match `text` (see [`SearchKind`]), streamed as they are
+    /// found. The text is searched literally (no regular expressions) and never becomes an
+    /// option: it is attached to its option (`--grep=…`, `-S…`) or given as a literal pathspec.
+    pub fn search(&self, kind: SearchKind, text: &str) -> Result<SearchStream, GitError> {
+        let Some(revisions) = self.revisions()? else {
+            return Ok(SearchStream { stream: None });
+        };
+        let mut args: Vec<OsString> = vec![
+            "--literal-pathspecs".into(),
+            "log".into(),
+            "-z".into(),
+            "--format=%H".into(),
+            "--no-color".into(),
+        ];
+        match kind {
+            SearchKind::Message => {
+                args.extend(["--regexp-ignore-case".into(), "--fixed-strings".into()]);
+                args.push(format!("--grep={text}").into());
+            }
+            SearchKind::Author => {
+                args.extend(["--regexp-ignore-case".into(), "--fixed-strings".into()]);
+                args.push(format!("--author={text}").into());
+            }
+            SearchKind::Content => args.push(format!("-S{text}").into()),
+            SearchKind::Path => {}
+        }
+        args.extend(revisions);
+        if kind == SearchKind::Path {
+            args.push("--".into());
+            args.push(text.into());
         }
         let stream = self.runner.stream(&self.workdir, &self.read_config, args)?;
-        Ok(LogReader::new(Some(stream)))
+        Ok(SearchStream {
+            stream: Some(stream),
+        })
+    }
+}
+
+/// What a history search looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    /// The commit message (case-insensitive).
+    Message,
+    /// Author name or e-mail (case-insensitive).
+    Author,
+    /// Commits that touched a path (a file or everything below a directory).
+    Path,
+    /// Commits that added or removed a string in a file's content (slow on large histories).
+    Content,
+}
+
+/// Commit ids of a running search. Dropping it stops git.
+pub struct SearchStream {
+    stream: Option<crate::GitStream>,
+}
+
+impl SearchStream {
+    /// Up to `n` further matches; fewer at the end (then [`SearchStream::is_done`]).
+    pub fn next_batch(&mut self, n: usize) -> Result<Vec<Oid>, GitError> {
+        let mut batch = Vec::new();
+        while batch.len() < n {
+            let Some(stream) = self.stream.as_mut() else {
+                break;
+            };
+            match stream.next_record(0, 128)? {
+                Some(rec) => {
+                    let text = String::from_utf8_lossy(&rec);
+                    let id = text.trim();
+                    if !id.is_empty() {
+                        batch.push(
+                            Oid::parse(id)
+                                .ok_or_else(|| GitError::Parse(format!("search: {id:?}")))?,
+                        );
+                    }
+                }
+                None => {
+                    if let Some(stream) = self.stream.take() {
+                        stream.finish()?;
+                    }
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.stream.is_none()
     }
 }
 

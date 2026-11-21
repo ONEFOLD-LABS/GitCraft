@@ -23,6 +23,6 @@ pub use error::GitError;
 pub use log::{Commit, LogReader, Signature};
 pub use path::RepoPath;
 pub use refs::{Ref, RefKind, Stash, Tracking};
-pub use repo::{Repository, UNTRACKED_MAX};
+pub use repo::{Repository, SearchKind, SearchStream, UNTRACKED_MAX};
 pub use runner::{GitRunner, GitStream, GitVersion, MIN_VERSION};
 pub use status::{Change, Conflict, FileChange, Head, Oid, State, Status, Upstream};
