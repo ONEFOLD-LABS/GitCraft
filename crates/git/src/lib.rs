@@ -26,7 +26,7 @@ pub use error::GitError;
 pub use log::{Commit, LogReader, Signature};
 pub use path::RepoPath;
 pub use refs::{Ref, RefKind, Stash, Tracking};
-pub use repo::{NameError, Repository, SearchKind, SearchStream, UNTRACKED_MAX};
+pub use repo::{Identity, NameError, Repository, SearchKind, SearchStream, UNTRACKED_MAX};
 pub use runner::{Cancel, GitRunner, GitStream, GitVersion, MIN_VERSION, Written};
 pub use status::{Change, Conflict, FileChange, Head, Oid, State, Status, Upstream};
 pub use trust::{ProgramSetting, TrustReport};

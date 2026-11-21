@@ -7,8 +7,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use gitcraft_git::{
-    Cancel, ChangedFile, CommandLog, Commit, FileDiff, GitError, GitRunner, LogReader, Ref,
-    RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
+    Cancel, ChangedFile, CommandLog, Commit, FileDiff, GitError, GitRunner, Identity, LogReader,
+    Ref, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -72,6 +72,24 @@ pub enum Command {
     Unstage(Vec<RepoPath>),
     /// Unstage everything (`reset`; `rm --cached -r .` before the first commit).
     UnstageAll,
+    /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
+    /// [--no-verify]`, message on stdin).
+    Commit {
+        message: String,
+        amend: bool,
+        no_verify: bool,
+    },
+    /// Read `user.name` and `user.email` (`config --get`).
+    Identity,
+    /// Set `user.name` and `user.email` (`config --global|--local`).
+    SetIdentity {
+        name: String,
+        email: String,
+        global: bool,
+    },
+    /// Message of `HEAD` and whether it is already on a remote (`log -1`, `for-each-ref
+    /// --contains`), for amending.
+    AmendInfo,
     /// Blocks the write queue until the barrier is passed (tests of ordering and cancellation).
     #[cfg(test)]
     Hold(Arc<std::sync::Barrier>),
@@ -81,16 +99,25 @@ pub enum Command {
 const REFRESH: usize = 0;
 const DETAILS: usize = 1;
 const DIFF: usize = 2;
-const SLOTS: usize = 3;
+const IDENTITY: usize = 3;
+const AMEND: usize = 4;
+const SLOTS: usize = 5;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
     pub fn is_write(&self) -> bool {
         match self {
-            Command::Refresh | Command::CommitDetails(_) | Command::Diff(_) => false,
-            Command::Stage(_) | Command::StageAll | Command::Unstage(_) | Command::UnstageAll => {
-                true
-            }
+            Command::Refresh
+            | Command::CommitDetails(_)
+            | Command::Diff(_)
+            | Command::Identity
+            | Command::AmendInfo => false,
+            Command::Stage(_)
+            | Command::StageAll
+            | Command::Unstage(_)
+            | Command::UnstageAll
+            | Command::Commit { .. }
+            | Command::SetIdentity { .. } => true,
             #[cfg(test)]
             Command::Hold(_) => true,
         }
@@ -101,6 +128,8 @@ impl Command {
             Command::Refresh => Some(REFRESH),
             Command::CommitDetails(_) => Some(DETAILS),
             Command::Diff(_) => Some(DIFF),
+            Command::Identity => Some(IDENTITY),
+            Command::AmendInfo => Some(AMEND),
             _ => None,
         }
     }
@@ -115,6 +144,9 @@ pub enum Outcome {
         files: Vec<ChangedFile>,
     },
     Diff(FileDiff),
+    Identity(Identity),
+    /// The message of `HEAD` and whether a remote has it; `None` before the first commit.
+    AmendInfo(Option<(String, bool)>),
     /// A write finished; git's output (hooks, notes).
     Written(Written),
 }
@@ -377,6 +409,21 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         Command::StageAll => Outcome::Written(repo.stage_all(cancel)?),
         Command::Unstage(paths) => Outcome::Written(repo.unstage(paths, cancel)?),
         Command::UnstageAll => Outcome::Written(repo.unstage_all(cancel)?),
+        Command::Commit {
+            message,
+            amend,
+            no_verify,
+        } => Outcome::Written(repo.commit(message, *amend, *no_verify, cancel)?),
+        Command::Identity => Outcome::Identity(repo.identity()?),
+        Command::SetIdentity {
+            name,
+            email,
+            global,
+        } => {
+            repo.set_identity(name, email, *global, cancel)?;
+            Outcome::Written(Written::default())
+        }
+        Command::AmendInfo => Outcome::AmendInfo(repo.head_for_amend()?),
         #[cfg(test)]
         Command::Hold(barrier) => {
             barrier.wait();

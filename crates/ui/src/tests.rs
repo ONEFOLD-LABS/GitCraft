@@ -806,3 +806,112 @@ fn read_only_refuses_writes_with_an_explanation() {
     );
     assert!(staged_paths(h.state()).is_empty());
 }
+
+/// Focuses the text field labelled `label` and types `text`.
+fn type_into(h: &mut Harness<'_, RepoWindow>, label: &str, text: &str) {
+    use egui::accesskit::Role;
+    let role = if h.query_by_role_and_label(Role::TextInput, label).is_some() {
+        Role::TextInput
+    } else {
+        Role::MultilineTextInput
+    };
+    h.get_by_role_and_label(role, label).focus();
+    h.step();
+    h.get_by_role_and_label(role, label).type_text(text);
+    h.step();
+}
+
+fn subjects_of(f: &Fixture) -> Vec<String> {
+    let repo = Repository::open(&f.runner(), &f.repo()).unwrap();
+    let mut log = repo.log().unwrap();
+    log.next_page(100)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.subject)
+        .collect()
+}
+
+/// Without an identity the form asks for it first; then a commit runs with Ctrl+Enter and the
+/// form starts over.
+#[test]
+fn commit_form_sets_the_identity_and_commits() {
+    let f = Fixture::new();
+    f.write("a.txt", "1");
+    let mut h = harness(f.window());
+    // The identity is read in the background when the repository opens.
+    h.state()
+        .session
+        .as_ref()
+        .unwrap()
+        .submit(gitcraft_core::Command::Identity);
+    settle(&mut h);
+    type_into(&mut h, "Name", "Erika Muster");
+    type_into(&mut h, "E-Mail", "erika@invalid");
+    h.run_steps(2);
+    h.get_by_label("Nur für dieses Repository").click();
+    h.get_by_label("Speichern").click();
+    settle(&mut h);
+    assert!(h.state().commit.identity.as_ref().unwrap().is_complete());
+
+    h.get_by_label("Alle vormerken").click();
+    settle(&mut h);
+    type_into(&mut h, "Zusammenfassung", "Erster Commit");
+    type_into(&mut h, "Beschreibung (optional)", "Mit einer Beschreibung.");
+    h.run_steps(2);
+    if let (Ok(img), Ok(dir)) = (h.render(), std::env::var("GITCRAFT_SHOTS")) {
+        img.save(Path::new(&dir).join("commit-form-dark.png"))
+            .unwrap();
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(subjects_of(&f), ["Erster Commit"]);
+    assert!(h.state().commit.summary.is_empty(), "the form starts over");
+    assert!(h.state().status().unwrap().is_clean());
+}
+
+/// Amend loads the last message and replaces the commit.
+#[test]
+fn commit_form_amends_the_last_commit() {
+    let f = Fixture::new();
+    assert!(f.git(&["config", "user.name", "Test"]));
+    assert!(f.git(&["config", "user.email", "t@invalid"]));
+    f.write("a.txt", "1");
+    f.commit_all("Tippfeler");
+    f.write("b.txt", "2");
+    let mut h = harness(f.window());
+    h.state()
+        .session
+        .as_ref()
+        .unwrap()
+        .submit(gitcraft_core::Command::Identity);
+    settle(&mut h);
+    h.get_by_label("Alle vormerken").click();
+    settle(&mut h);
+    h.get_by_label("Letzten Commit ändern").click();
+    settle(&mut h);
+    assert_eq!(h.state().commit.summary, "Tippfeler");
+    h.state_mut().commit.summary = "Tippfehler".into();
+    h.run_steps(2);
+    h.get_by_label("Commit ändern").click();
+    settle(&mut h);
+    assert_eq!(h.state().error(), None);
+    assert_eq!(subjects_of(&f), ["Tippfehler"]);
+}
+
+#[test]
+fn render_commit_form_light() {
+    let f = Fixture::new();
+    assert!(f.git(&["config", "user.name", "Test"]));
+    assert!(f.git(&["config", "user.email", "t@invalid"]));
+    f.write("a.txt", "1");
+    assert!(f.git(&["add", "a.txt"]));
+    let mut w = f.window();
+    w.commit.set_identity(gitcraft_git::Identity {
+        name: Some("Test".into()),
+        email: Some("t@invalid".into()),
+    });
+    w.commit.summary =
+        "Eine Zusammenfassung, die deutlich länger ist als zweiundsiebzig Zeichen erlaubt".into();
+    shot("commit-form-light", ThemePreference::Light, w);
+}

@@ -33,6 +33,8 @@ pub enum GitError {
     TimedOut { command: String, seconds: u64 },
     /// The repository's program settings are not trusted (yet): GitCraft refuses to write.
     NotTrusted,
+    /// A value GitCraft refuses to hand to git (empty, or with control characters).
+    InvalidValue(String),
     /// The user cancelled the call; git and what it started were stopped.
     Cancelled,
     /// The repository's configuration names a program in a way GitCraft cannot switch off.
@@ -78,6 +80,7 @@ impl fmt::Display for GitError {
                 )
             }
             GitError::Cancelled => write!(f, "cancelled"),
+            GitError::InvalidValue(v) => write!(f, "invalid value {v:?}"),
             GitError::NotTrusted => write!(
                 f,
                 "the repository runs programs from its own configuration and is not trusted"

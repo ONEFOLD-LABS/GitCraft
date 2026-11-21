@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use gitcraft_git::{
-    Cancel, Change, CommandLog, Conflict, GitError, GitRunner, Head, NameError, RepoPath,
+    Cancel, Change, CommandLog, Conflict, GitError, GitRunner, Head, Identity, NameError, RepoPath,
     Repository, State, Status,
 };
 use tempfile::TempDir;
@@ -1002,4 +1002,156 @@ fn trust_report_lists_program_settings_and_hooks() {
     assert_eq!(r.hooks_dir, f.open().workdir().join(".husky"));
     assert!(r.hooks.is_empty());
     assert!(r.settings.iter().any(|s| s.key == "core.hookspath"));
+}
+
+fn subjects(repo: &Repository) -> Vec<String> {
+    all_commits(repo).into_iter().map(|c| c.subject).collect()
+}
+
+/// A repository with an identity in its own configuration.
+fn with_identity() -> (Fixture, Repository) {
+    let f = Fixture::new();
+    let repo = f.open();
+    repo.set_identity("Test Person", "test@invalid", false, &Cancel::new())
+        .unwrap();
+    (f, repo)
+}
+
+#[test]
+fn identity_is_read_and_set() {
+    let f = Fixture::new();
+    let repo = f.open();
+    assert_eq!(repo.identity().unwrap(), Identity::default());
+    assert!(!repo.identity().unwrap().is_complete());
+    let c = Cancel::new();
+    assert!(matches!(
+        repo.set_identity("A\nB", "a@b", false, &c),
+        Err(GitError::InvalidValue(_))
+    ));
+    assert!(matches!(
+        repo.set_identity(" ", "a@b", false, &c),
+        Err(GitError::InvalidValue(_))
+    ));
+    // A value that looks like an option is stored as the value.
+    repo.set_identity("-n Name", "--global", false, &c).unwrap();
+    let id = repo.identity().unwrap();
+    assert_eq!(id.name.as_deref(), Some("-n Name"));
+    assert_eq!(id.email.as_deref(), Some("--global"));
+    assert_eq!(
+        fs::read_to_string(f.global_config()).unwrap(),
+        "",
+        "only local"
+    );
+    repo.set_identity("Global", "g@invalid", true, &c).unwrap();
+    assert!(
+        fs::read_to_string(f.global_config())
+            .unwrap()
+            .contains("g@invalid")
+    );
+}
+
+#[test]
+fn commit_on_an_unborn_branch_and_after() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    f.write("a.txt", "1");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Erster Commit\n\n#42 bleibt stehen\n\n\n", false, false, &c)
+        .unwrap();
+    let commits = all_commits(&repo);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].author.name, "Test Person");
+    assert_eq!(
+        repo.commit_message(&commits[0]).unwrap(),
+        "Erster Commit\n\n#42 bleibt stehen",
+        "lines starting with # are kept, trailing blank lines dropped"
+    );
+    assert!(repo.status().unwrap().is_clean());
+
+    // Nothing staged: git refuses.
+    assert!(matches!(
+        repo.commit("Leer", false, false, &c),
+        Err(GitError::Failed { .. })
+    ));
+    // An empty message is refused.
+    f.write("a.txt", "2");
+    repo.stage_all(&c).unwrap();
+    assert!(matches!(
+        repo.commit("  \n\n", false, false, &c),
+        Err(GitError::Failed { .. })
+    ));
+    assert_eq!(subjects(&repo), ["Erster Commit"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn hooks_run_and_can_be_skipped() {
+    use std::os::unix::fs::PermissionsExt;
+    let (f, repo) = with_identity();
+    let hook = f.repo().join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\necho 'Bitte erst testen' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let c = Cancel::new();
+    f.write("a.txt", "1");
+    repo.stage_all(&c).unwrap();
+    match repo.commit("Mit Hook", false, false, &c) {
+        Err(GitError::Failed { stderr, .. }) => assert!(stderr.contains("Bitte erst testen")),
+        other => panic!("{other:?}"),
+    }
+    assert!(subjects(&repo).is_empty());
+    repo.commit("Ohne Hook", false, true, &c).unwrap();
+    assert_eq!(subjects(&repo), ["Ohne Hook"]);
+
+    // A hook that passes: its output comes back.
+    fs::write(&hook, "#!/bin/sh\necho 'alles gut' >&2\n").unwrap();
+    f.write("a.txt", "2");
+    repo.stage_all(&c).unwrap();
+    let out = repo.commit("Zweiter", false, false, &c).unwrap();
+    assert!(out.stderr.contains("alles gut"), "{out:?}");
+}
+
+#[test]
+fn amend_message_and_content_and_pushed_warning() {
+    let (f, repo) = with_identity();
+    let c = Cancel::new();
+    assert_eq!(repo.head_for_amend().unwrap(), None, "unborn");
+    f.write("a.txt", "1");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Tippfeler", false, false, &c).unwrap();
+    assert_eq!(
+        repo.head_for_amend().unwrap(),
+        Some(("Tippfeler".to_owned(), false))
+    );
+    // Message only.
+    repo.commit("Tippfehler", true, false, &c).unwrap();
+    assert_eq!(subjects(&repo), ["Tippfehler"]);
+    // Content.
+    f.write("b.txt", "neu");
+    repo.stage_all(&c).unwrap();
+    repo.commit("Tippfehler", true, false, &c).unwrap();
+    let commits = all_commits(&repo);
+    assert_eq!(commits.len(), 1);
+    let files: Vec<String> = repo
+        .commit_files(&commits[0])
+        .unwrap()
+        .into_iter()
+        .map(|x| x.path.display())
+        .collect();
+    assert_eq!(files, ["a.txt", "b.txt"]);
+
+    // Once a remote-tracking branch has it, amending needs a force push.
+    let remote = f.tmp.path().join("remote.git");
+    let out = f
+        .command(f.tmp.path())
+        .args(["init", "-q", "--bare"])
+        .arg(&remote)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    f.git(&["push", "-q", "origin", "main"]);
+    assert_eq!(
+        repo.head_for_amend().unwrap(),
+        Some(("Tippfehler".to_owned(), true))
+    );
 }
