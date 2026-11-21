@@ -626,13 +626,23 @@ fn files_and_diffs_of_commits() {
 #[test]
 fn diffs_of_the_working_tree() {
     let f = Fixture::new();
+    // Names git would read as pathspec patterns: `[a].txt` is a glob that also matches `a.txt`.
+    // `:(glob)*` is pathspec magic; Windows forbids `:` and `*` in file names, so it only exists
+    // elsewhere.
+    let magic_name = cfg!(not(windows)).then_some(":(glob)*");
     f.write("a.txt", "1\n2\n");
-    f.write(":(glob)*", "literal name\n");
+    f.write("[a].txt", "literal name\n");
+    if let Some(m) = magic_name {
+        f.write(m, "literal name\n");
+    }
     f.commit_all("base");
     f.write("a.txt", "1\nzwei\n");
     f.git(&["add", "a.txt"]);
     f.write("a.txt", "1\nzwei\ndrei\n");
-    f.write(":(glob)*", "changed\n");
+    f.write("[a].txt", "changed\n");
+    if let Some(m) = magic_name {
+        f.write(m, "changed\n");
+    }
     f.write("neu.txt", "x\ny");
 
     let repo = f.open();
@@ -641,9 +651,13 @@ fn diffs_of_the_working_tree() {
     assert_eq!((staged.added(), staged.removed()), (1, 1));
     let unstaged = repo.worktree_diff(&path("a.txt"), None, false).unwrap();
     assert_eq!((unstaged.added(), unstaged.removed()), (1, 0));
-    // A name that looks like pathspec magic is taken literally: only that file.
-    let magic = repo.worktree_diff(&path(":(glob)*"), None, false).unwrap();
-    assert_eq!((magic.added(), magic.removed()), (1, 1));
+    // Names that look like patterns are taken literally: only that file.
+    let glob = repo.worktree_diff(&path("[a].txt"), None, false).unwrap();
+    assert_eq!((glob.added(), glob.removed()), (1, 1));
+    if let Some(m) = magic_name {
+        let magic = repo.worktree_diff(&path(m), None, false).unwrap();
+        assert_eq!((magic.added(), magic.removed()), (1, 1));
+    }
     let untracked = repo.untracked_diff(&path("neu.txt")).unwrap();
     assert_eq!(untracked.added(), 2);
     assert!(untracked.hunks[0].lines[1].no_newline);
