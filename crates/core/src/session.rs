@@ -72,6 +72,16 @@ pub enum Command {
     Unstage(Vec<RepoPath>),
     /// Unstage everything (`reset`; `rm --cached -r .` before the first commit).
     UnstageAll,
+    /// Stage (or with `staged` unstage) some lines of a working-tree diff: (hunk, line)
+    /// positions in `shown`, the diff the user saw (`apply --cached --recount [--reverse] -`,
+    /// refused with [`GitError::Stale`] when the file changed since).
+    StageLines {
+        path: RepoPath,
+        old: Option<RepoPath>,
+        staged: bool,
+        shown: Box<FileDiff>,
+        lines: Vec<(usize, usize)>,
+    },
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
     /// [--no-verify]`, message on stdin).
     Commit {
@@ -116,6 +126,7 @@ impl Command {
             | Command::StageAll
             | Command::Unstage(_)
             | Command::UnstageAll
+            | Command::StageLines { .. }
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -409,6 +420,15 @@ fn run(repo: &Repository, command: &Command, cancel: &Cancel) -> Result<Outcome,
         Command::StageAll => Outcome::Written(repo.stage_all(cancel)?),
         Command::Unstage(paths) => Outcome::Written(repo.unstage(paths, cancel)?),
         Command::UnstageAll => Outcome::Written(repo.unstage_all(cancel)?),
+        Command::StageLines {
+            path,
+            old,
+            staged,
+            shown,
+            lines,
+        } => {
+            Outcome::Written(repo.stage_lines(path, old.as_ref(), *staged, shown, lines, cancel)?)
+        }
         Command::Commit {
             message,
             amend,

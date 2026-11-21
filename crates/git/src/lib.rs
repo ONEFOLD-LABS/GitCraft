@@ -12,6 +12,7 @@ mod diff;
 mod display;
 mod error;
 mod log;
+mod patch;
 mod path;
 mod refs;
 mod repo;

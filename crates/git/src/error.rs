@@ -35,6 +35,8 @@ pub enum GitError {
     NotTrusted,
     /// A value GitCraft refuses to hand to git (empty, or with control characters).
     InvalidValue(String),
+    /// The file changed since its diff was shown; nothing was applied.
+    Stale,
     /// The user cancelled the call; git and what it started were stopped.
     Cancelled,
     /// The repository's configuration names a program in a way GitCraft cannot switch off.
@@ -80,6 +82,7 @@ impl fmt::Display for GitError {
                 )
             }
             GitError::Cancelled => write!(f, "cancelled"),
+            GitError::Stale => write!(f, "the file changed since its diff was shown"),
             GitError::InvalidValue(v) => write!(f, "invalid value {v:?}"),
             GitError::NotTrusted => write!(
                 f,

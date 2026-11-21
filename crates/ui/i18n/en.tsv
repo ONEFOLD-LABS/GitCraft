@@ -181,3 +181,12 @@ E-Mail	E-mail
 Für alle Repositories	For all repositories
 Nur für dieses Repository	Only for this repository
 Speichern	Save
+Hunk vormerken	Stage hunk
+Hunk zurücknehmen	Unstage hunk
+Auswahl vormerken ({n})	Stage selection ({n})
+Auswahl zurücknehmen ({n})	Unstage selection ({n})
+Auswahl aufheben	Clear selection
+Enter	Enter
+Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.	The file changed since its diff was shown; nothing was applied. The diff has been reloaded.
+Pfeil hoch/runter, Shift+Pfeil, Enter	Arrow up/down, Shift+arrow, Enter
+Zeilen im Diff wählen und vormerken	Select lines in a diff and stage them

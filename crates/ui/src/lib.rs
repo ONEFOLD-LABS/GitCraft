@@ -28,7 +28,7 @@ use gitcraft_git::{
 
 use crate::avatars::Avatars;
 use crate::commit::{CommitForm, FormAction};
-use crate::diffview::{DiffAction, Prepared};
+use crate::diffview::{DiffAction, Prepared, Side};
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
 use crate::search::{BarAction, Search};
@@ -152,6 +152,8 @@ pub struct RepoWindow {
     commit: CommitForm,
     /// Commit messages not committed yet, per repository (working tree).
     drafts: std::collections::HashMap<PathBuf, (String, String)>,
+    /// The error shown came from a read; the next good snapshot clears it.
+    read_error: bool,
     /// A write waiting for the user to trust the repository (the trust dialog is open).
     trust_prompt: Option<Command>,
     /// The user chose to keep this repository read-only (no more asking until it is reopened).
@@ -189,6 +191,7 @@ impl RepoWindow {
             error: None,
             commit: CommitForm::default(),
             drafts: std::collections::HashMap::new(),
+            read_error: false,
             trust_prompt: None,
             read_only: false,
             opening: None,
@@ -313,6 +316,8 @@ impl RepoWindow {
         self.history = History::start(&session.reader(), ctx);
         self.trust_prompt = None;
         self.read_only = false;
+        self.error = None;
+        self.read_error = false;
         // Keep the draft of the repository shown so far; pick up this one's.
         if let Some(old) = &self.session {
             let draft = (
@@ -373,7 +378,12 @@ impl RepoWindow {
             self.selection = Selection::WorkInProgress;
         }
         self.snapshot = Some(snapshot);
-        self.error = None;
+        // A successful read ends an error of an earlier read, not that of a write (the refresh
+        // after a failed write must not hide why it failed).
+        if self.read_error {
+            self.read_error = false;
+            self.error = None;
+        }
     }
 
     fn collect(&mut self, ctx: &egui::Context) {
@@ -465,6 +475,10 @@ impl RepoWindow {
                 }
             }
             (Command::AmendInfo, Ok(Outcome::AmendInfo(info))) => self.commit.set_amend_info(info),
+            (Command::Refresh, Err(e)) => {
+                self.error = Some(error_text(&e));
+                self.read_error = true;
+            }
             (_, Err(e)) => self.error = Some(error_text(&e)),
             (_, Ok(Outcome::Written(_))) => self.error = None,
             (_, Ok(_)) => {}
@@ -621,7 +635,14 @@ impl RepoWindow {
                 ui.label(RichText::new(e).color(t.error_text));
                 action
             }
-            (Some(prepared), None) => prepared.show(ui, t, op.as_ref().map(StageOp::label)),
+            (Some(prepared), None) => {
+                let side = match &state.key {
+                    DiffKey::Worktree { staged: false, .. } => Some(Side::Unstaged),
+                    DiffKey::Worktree { staged: true, .. } => Some(Side::Staged),
+                    _ => None,
+                };
+                prepared.show(ui, t, op.as_ref().map(StageOp::label), side)
+            }
             (None, None) => {
                 let action = back(ui);
                 ui.horizontal(|ui| {
@@ -636,6 +657,22 @@ impl RepoWindow {
             DiffAction::Act => {
                 if let Some(op) = op {
                     self.stage(op);
+                }
+            }
+            DiffAction::Lines(lines) => {
+                if let Some(state) = &self.diff
+                    && let DiffKey::Worktree { path, old, staged } = &state.key
+                    && let Some(prepared) = &state.prepared
+                {
+                    let command = Command::StageLines {
+                        path: path.clone(),
+                        old: old.clone(),
+                        staged: *staged,
+                        shown: Box::new(prepared.diff.clone()),
+                        lines,
+                    };
+                    // The refresh after the write reloads the diff.
+                    self.write(command);
                 }
             }
             DiffAction::None => {}
@@ -1046,6 +1083,10 @@ impl RepoWindow {
                         "Commit wählen",
                     ),
                     (f(&COPY), "Commit-ID kopieren"),
+                    (
+                        tr("Pfeil hoch/runter, Shift+Pfeil, Enter").to_owned(),
+                        "Zeilen im Diff wählen und vormerken",
+                    ),
                     (f(&commit::COMMIT_KEY), "Committen (im Commit-Formular)"),
                     ("Esc".to_owned(), "Diff oder Suche schließen"),
                     (tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0").to_owned(), "Zoom"),
@@ -1865,6 +1906,7 @@ fn error_text(e: &GitError) -> String {
             &[("schluessel", &escape(key))],
         ),
         GitError::Cancelled => tr("Abgebrochen.").to_owned(),
+        GitError::Stale => tr("Die Datei hat sich geändert, seit ihr Diff angezeigt wurde; nichts wurde übernommen. Der Diff ist neu geladen.").to_owned(),
         GitError::InvalidValue(v) => trf(
             "Ungültige Eingabe: {wert}",
             &[("wert", &escape(v))],

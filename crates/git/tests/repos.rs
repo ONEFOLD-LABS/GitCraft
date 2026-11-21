@@ -1155,3 +1155,185 @@ fn amend_message_and_content_and_pushed_warning() {
         Some(("Tippfehler".to_owned(), true))
     );
 }
+
+/// Thirty lines; `changes` replaces line n (1-based) with "n neu".
+fn numbered(changes: &[usize], eol: &str) -> String {
+    (1..=30)
+        .map(|n| {
+            if changes.contains(&n) {
+                format!("{n} neu{eol}")
+            } else {
+                format!("{n}{eol}")
+            }
+        })
+        .collect()
+}
+
+fn hunk_fixture(eol: &str) -> (Fixture, Repository, RepoPath) {
+    let (f, repo) = with_identity();
+    f.write("f.txt", &numbered(&[], eol));
+    repo.stage_all(&Cancel::new()).unwrap();
+    repo.commit("Anfang", false, false, &Cancel::new()).unwrap();
+    f.write("f.txt", &numbered(&[2, 15, 28], eol));
+    (f, repo, RepoPath::from_bytes(b"f.txt"))
+}
+
+/// The changed lines (hunk, line) of hunk `h`.
+fn hunk_lines(d: &gitcraft_git::FileDiff, h: usize) -> Vec<(usize, usize)> {
+    d.hunks[h]
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.kind != gitcraft_git::LineKind::Context)
+        .map(|(i, _)| (h, i))
+        .collect()
+}
+
+fn staged_text(f: &Fixture) -> String {
+    let out = f
+        .command(&f.repo())
+        .args(["show", ":f.txt"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn stage_first_middle_and_last_hunk() {
+    for (h, line) in [(0, 2), (1, 15), (2, 28)] {
+        let (f, repo, p) = hunk_fixture("\n");
+        let shown = repo.worktree_diff(&p, None, false).unwrap();
+        assert_eq!(shown.hunks.len(), 3);
+        repo.stage_lines(
+            &p,
+            None,
+            false,
+            &shown,
+            &hunk_lines(&shown, h),
+            &Cancel::new(),
+        )
+        .unwrap();
+        assert_eq!(staged_text(&f), numbered(&[line], "\n"), "hunk {h}");
+        // And back.
+        let staged = repo.worktree_diff(&p, None, true).unwrap();
+        repo.stage_lines(
+            &p,
+            None,
+            true,
+            &staged,
+            &hunk_lines(&staged, 0),
+            &Cancel::new(),
+        )
+        .unwrap();
+        assert_eq!(staged_text(&f), numbered(&[], "\n"));
+    }
+}
+
+#[test]
+fn hunks_of_crlf_files_keep_their_line_endings() {
+    let (f, repo, p) = hunk_fixture("\r\n");
+    let shown = repo.worktree_diff(&p, None, false).unwrap();
+    repo.stage_lines(
+        &p,
+        None,
+        false,
+        &shown,
+        &hunk_lines(&shown, 1),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert_eq!(staged_text(&f), numbered(&[15], "\r\n"));
+}
+
+#[test]
+fn hunks_at_an_end_without_newline() {
+    let (f, repo) = with_identity();
+    f.write("f.txt", "a\nb\nc");
+    repo.stage_all(&Cancel::new()).unwrap();
+    repo.commit("Anfang", false, false, &Cancel::new()).unwrap();
+    f.write("f.txt", "a\nb\nC");
+    let p = RepoPath::from_bytes(b"f.txt");
+    let shown = repo.worktree_diff(&p, None, false).unwrap();
+    repo.stage_lines(
+        &p,
+        None,
+        false,
+        &shown,
+        &hunk_lines(&shown, 0),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert_eq!(staged_text(&f), "a\nb\nC");
+}
+
+#[test]
+fn a_file_changed_since_display_is_not_touched() {
+    let (f, repo, p) = hunk_fixture("\n");
+    let shown = repo.worktree_diff(&p, None, false).unwrap();
+    f.write("f.txt", &numbered(&[2, 15, 20, 28], "\n"));
+    assert_eq!(
+        repo.stage_lines(
+            &p,
+            None,
+            false,
+            &shown,
+            &hunk_lines(&shown, 0),
+            &Cancel::new()
+        ),
+        Err(GitError::Stale)
+    );
+    assert_eq!(staged_text(&f), numbered(&[], "\n"));
+}
+
+#[test]
+fn stage_single_lines() {
+    let (f, repo) = with_identity();
+    f.write("f.txt", "a\nb\nc\nd\n");
+    repo.stage_all(&Cancel::new()).unwrap();
+    repo.commit("Anfang", false, false, &Cancel::new()).unwrap();
+    // One hunk: b removed, B1 and B2 added, d removed.
+    f.write("f.txt", "a\nB1\nB2\nc\n");
+    let p = RepoPath::from_bytes(b"f.txt");
+    let c = Cancel::new();
+    let shown = repo.worktree_diff(&p, None, false).unwrap();
+    let pos = |text: &str, kind| {
+        let i = shown.hunks[0]
+            .lines
+            .iter()
+            .position(|l| l.text == text.as_bytes() && l.kind == kind)
+            .unwrap();
+        (0, i)
+    };
+    use gitcraft_git::LineKind::{Added, Removed};
+    // Added only.
+    repo.stage_lines(&p, None, false, &shown, &[pos("B2", Added)], &c)
+        .unwrap();
+    assert_eq!(staged_text(&f), "a\nb\nB2\nc\nd\n");
+    repo.unstage_all(&c).unwrap();
+    // Removed only.
+    repo.stage_lines(&p, None, false, &shown, &[pos("d", Removed)], &c)
+        .unwrap();
+    assert_eq!(staged_text(&f), "a\nb\nc\n");
+    repo.unstage_all(&c).unwrap();
+    // Mixed: replace b with B1.
+    repo.stage_lines(
+        &p,
+        None,
+        false,
+        &shown,
+        &[pos("b", Removed), pos("B1", Added)],
+        &c,
+    )
+    .unwrap();
+    assert_eq!(staged_text(&f), "a\nB1\nc\nd\n");
+    // Unstage just the B1 line again: b stays removed in the index.
+    let staged = repo.worktree_diff(&p, None, true).unwrap();
+    let b1 = staged.hunks[0]
+        .lines
+        .iter()
+        .position(|l| l.text == b"B1")
+        .unwrap();
+    repo.stage_lines(&p, None, true, &staged, &[(0, b1)], &c)
+        .unwrap();
+    assert_eq!(staged_text(&f), "a\nc\nd\n");
+}
