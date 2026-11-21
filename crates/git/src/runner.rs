@@ -723,6 +723,8 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(10));
     }
 
+    // Only the Unix tests below start a stand-in process.
+    #[cfg(unix)]
     impl Call {
         fn bare(command: &str) -> Call {
             Call {
