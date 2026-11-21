@@ -1,30 +1,46 @@
 # Englische Texte der Oberfläche: deutsch<TAB>englisch.
 , {n} Konflikte	, {n} conflicts
+1 Datei geändert	1 file changed
 Aktualisieren	Refresh
+Anderes Repository öffnen	Open another repository
 Arbeitsstand	Work in progress
 Arbeitsstand: {geaendert} geändert, {vorgemerkt} vorgemerkt	Work in progress: {geaendert} changed, {vorgemerkt} staged
 Arbeitsverzeichnis und Index entsprechen dem letzten Commit.	Working tree and index match the last commit.
 auf dem Stand von {upstream}	up to date with {upstream}
 Autor	Author
 Autorenbilder von Gravatar laden	Load author images from Gravatar
+Befehle	Commands
+binär	binary
+Binärdatei, nicht als Text darstellbar.	Binary file, cannot be shown as text.
 Branch	Branch
 Branch / Tag	Branch / tag
 Branch {name}	Branch {name}
 Branch {name} (noch keine Commits)	Branch {name} (no commits yet)
 Branches, Tags und Stashes filtern	Filter branches, tags and stashes
 Commit	Commit
+Commit wählen	Select a commit
+Commit-ID	Commit ID
 Commit-ID kopieren	Copy commit ID
 Commit-Nachricht	Commit message
+Commits suchen ({taste})	Search commits ({taste})
 Committer	Committer
+Ctrl+Plus, Ctrl+Minus, Ctrl+0	Ctrl+Plus, Ctrl+Minus, Ctrl+0
 Dateityp geändert	file type changed
 Datum	Date
 Die Einstellungen konnten nicht gespeichert werden: {fehler}	The settings could not be saved: {fehler}
 Die Einstellungen waren nicht lesbar und wurden zurückgesetzt ({fehler}); die alte Datei liegt als settings.json.bak daneben.	The settings could not be read and were reset ({fehler}); the old file is kept next to them as settings.json.bak.
 Die Konfiguration des Repositorys setzt {schluessel}; GitCraft kann das nicht sicher abschalten und liest das Repository deshalb nicht.	The repository's configuration sets {schluessel}; GitCraft cannot switch it off safely and does not read the repository.
+Diese Übersicht	This list
+GitCraft unterstützen …	Support GitCraft…
+Dieser Diff hat {n} Zeilen.	This diff has {n} lines.
+Diff oder Suche schließen	Close the diff or the search
 Einstellungen	Settings
 Eltern	Parents
+Esc	Esc
+F1: Tastenkürzel	F1: shortcuts
 Filtern	Filter
 Für jede Autorin und jeden Autor geht ein Hash der E-Mail-Adresse an gravatar.com. Daran ist erkennbar, welche Personen in deinen Repositories vorkommen, auch in privaten. Bilder werden eine Woche lokal zwischengespeichert. Ohne diese Einstellung zeigt GitCraft Initialen und nimmt keine Verbindung auf.	For every author, a hash of their e-mail address is sent to gravatar.com. It shows which people appear in your repositories, private ones included. Images are cached locally for a week. Without this setting GitCraft shows initials and makes no connection.
+gekürzt	truncated
 gelöscht	deleted
 geändert	modified
 Git konnte nicht gestartet werden: {fehler}	Git could not be started: {fehler}
@@ -36,11 +52,16 @@ git {befehl} lieferte zu viel Ausgabe (über {mib} MiB).	git {befehl} produced t
 Git {version} ist zu alt; GitCraft braucht {min} oder neuer.	Git {version} is too old; GitCraft needs {min} or newer.
 Graph	Graph
 hinzugefügt	added
+Historie durchsuchen	Search the history
+Inhalt	Content
 jetzt	now
 Kein Repository geöffnet	No repository open
 kein Upstream	no upstream
+Kein Zeilenumbruch am Dateiende	No newline at end of file
 keine (erster Commit)	none (first commit)
+Keine Treffer	No matches
 Keine Änderungen	No changes
+Keine Änderungen am Inhalt.	No changes to the content.
 Kommt mit Version {v}	Comes with version {v}
 Konflikt: beide gelöscht	conflict: both deleted
 Konflikt: beide geändert	conflict: both modified
@@ -53,14 +74,23 @@ Konflikte	Conflicts
 Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}	Conflicts {konflikte} · Staged {vorgemerkt} · Modified {geaendert} · Untracked {neu}
 Kopieren	Copy
 kopiert	copied
+Lade Diff …	Loading diff …
 Leeres Repository	Empty repository
 Lese Status …	Reading status …
 Lokal	Local
 Losgelöster HEAD bei {commit}	Detached HEAD at {commit}
+Modus {alt} -> {neu}	mode {alt} -> {neu}
+Nachricht	Message
 Nachricht kopieren	Copy message
+neue Datei	new file
 Nicht vorgemerkt	Not staged
 Nichts ausgewählt	Nothing selected
 Noch keine Commits und keine Dateien.	No commits and no files yet.
+Nächster	Next
+Nächster / vorheriger Treffer	Next / previous match
+Offene Änderungen	Open changes
+Pfad	Path
+Pfeil hoch/runter, Bild hoch/runter, Pos1, Ende	Arrow up/down, Page up/down, Home, End
 Pop	Pop
 Pull	Pull
 Push	Push
@@ -69,10 +99,15 @@ Repository	Repository
 Repository öffnen	Open repository
 Repository öffnen …	Open repository …
 Rückgängig	Undo
+Schließen	Close
 Stash	Stash
 Stashes	Stashes
 Status neu lesen	Read the status again
+Submodul	submodule
+Suche …	Searching …
 Tags	Tags
+Tastenkürzel	Keyboard shortcuts
+Trotzdem anzeigen	Show anyway
 umbenannt	renamed
 Unerwartete Ausgabe von git: {fehler}	Unexpected output from git: {fehler}
 Unversioniert	Untracked
@@ -80,19 +115,29 @@ unversioniert	untracked
 Upstream weg	upstream gone
 Upstream {upstream} existiert nicht mehr	Upstream {upstream} no longer exists
 Vorgemerkt	Staged
+Vorheriger	Previous
 Wie das System	Like the system
 Wiederholen	Redo
+Wonach gesucht wird	What to search
+Zoom	Zoom
+Zoom {p} %	Zoom {p} %
+Zurück zum Graphen	Back to the graph
 {name}: Upstream {upstream} existiert nicht mehr	{name}: upstream {upstream} no longer exists
 {name}: {voraus} voraus, {zurueck} zurück gegenüber {upstream}	{name}: {voraus} ahead, {zurueck} behind {upstream}
 {n} Commits	{n} commits
 {n} Commits geladen …	{n} commits loaded …
+{n} Commits zum Hochladen	{n} commits to push
+{n} Commits zum Holen	{n} commits to pull
+{n} Dateien geändert	{n} files changed
 {n} J.	{n} y
 {n} Min.	{n} min
 {n} Mon.	{n} mo
 {n} Std.	{n} h
 {n} Tg.	{n} d
+{n} Treffer	{n} matches
 {pfad} ist ein Bare-Repository ohne Arbeitsverzeichnis; das wird noch nicht unterstützt.	{pfad} is a bare repository without a working tree; this is not supported yet.
 {pfad} ist kein Git-Repository.	{pfad} is not a Git repository.
+{p} von {n}	{p} of {n}
 {voraus} voraus, {zurueck} zurück gegenüber {upstream}	{voraus} ahead, {zurueck} behind {upstream}
 Öffne einen Ordner mit einem Git-Repository oder ziehe ihn in dieses Fenster.	Open a folder with a Git repository or drag it into this window.
 Öffne {pfad} …	Opening {pfad} …

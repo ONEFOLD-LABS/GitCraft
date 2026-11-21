@@ -6,8 +6,10 @@
 //! it.
 
 mod avatars;
+mod diffview;
 mod history;
 pub mod i18n;
+mod search;
 pub mod settings;
 mod sidebar;
 pub mod theme;
@@ -18,20 +20,29 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, KeyboardShortcut, Layout, Modifiers, RichText};
 use gitcraft_git::{
-    Change, Conflict, FileChange, GitError, GitRunner, GitVersion, Head, MIN_VERSION, Oid,
-    Repository, Status, escape,
+    Change, ChangedFile, Conflict, FileChange, FileStatus, GitError, GitRunner, GitVersion, Head,
+    MIN_VERSION, Oid, Repository, Status, escape,
 };
 
 use crate::avatars::Avatars;
+use crate::diffview::Prepared;
 use crate::history::{Action, History, Labels, Selection, View, WipCounts};
 use crate::i18n::{tr, trf};
+use crate::search::{BarAction, Search};
 use crate::settings::{Loaded, Settings};
-use crate::sidebar::Sidebar;
-use crate::worker::{Job, Outcome, Snapshot, Worker};
+use crate::sidebar::{Pick, Sidebar};
+use crate::worker::{DiffKey, Job, Outcome, Snapshot, Worker};
+
+/// The ONEFOLD LABS donation page, linked from the help window (F1).
+const SPONSOR_URL: &str = "https://ko-fi.com/onefoldlabs";
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+const KEYS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
 /// Colour role of a file row; the colour itself comes from the theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +68,29 @@ enum Row {
         /// What the letter means, for the tooltip and screen readers.
         meaning: &'static str,
         path: String,
+        /// The diff a click opens (none for conflicts until the conflict view exists).
+        diff: Option<DiffKey>,
     },
+}
+
+/// Generation tag of detail jobs (commit details, diffs); they are matched by what they
+/// belong to, not by generation.
+const DETAIL_JOB: u64 = u64::MAX - 1;
+
+/// Message and files of the selected commit (loading while `None`).
+struct Details {
+    id: Oid,
+    message: Option<String>,
+    files: Option<Vec<ChangedFile>>,
+    error: Option<String>,
+}
+
+/// The diff shown in the centre.
+struct DiffState {
+    key: DiffKey,
+    title: String,
+    prepared: Option<Prepared>,
+    error: Option<String>,
 }
 
 /// What is running right now (shown next to the spinner).
@@ -76,11 +109,15 @@ pub struct RepoWindow {
     labels: Labels,
     history: History,
     selection: Selection,
+    details: Option<Details>,
+    diff: Option<DiffState>,
+    search: Search,
     sidebar: Sidebar,
     settings: Settings,
     /// Where the settings are saved; `None` keeps them in memory (tests).
     settings_dir: Option<PathBuf>,
     show_settings: bool,
+    show_keys: bool,
     avatars: Avatars,
     error: Option<String>,
     busy: Option<Busy>,
@@ -105,10 +142,14 @@ impl RepoWindow {
             labels: Labels::default(),
             history: History::empty(),
             selection: Selection::None,
+            details: None,
+            diff: None,
+            search: Search::default(),
             sidebar: Sidebar::default(),
             settings: Settings::default(),
             settings_dir: None,
             show_settings: false,
+            show_keys: false,
             avatars: Avatars::off(),
             error: None,
             busy: None,
@@ -209,6 +250,9 @@ impl RepoWindow {
         self.history = History::start(&repo, ctx);
         self.repo = Some(repo);
         self.selection = Selection::None;
+        self.details = None;
+        self.diff = None;
+        self.search.close();
         self.apply(snapshot);
     }
 
@@ -221,6 +265,13 @@ impl RepoWindow {
             self.history = History::start(repo, ctx);
         }
         self.apply(snapshot);
+        // A diff of the working tree may have changed with it.
+        if let Some(state) = &self.diff
+            && !matches!(state.key, DiffKey::Commit { .. })
+        {
+            let (key, title) = (state.key.clone(), state.title.clone());
+            self.open_diff(key, title, ctx);
+        }
     }
 
     fn apply(&mut self, snapshot: Snapshot) {
@@ -239,10 +290,34 @@ impl RepoWindow {
 
     fn collect(&mut self, ctx: &egui::Context) {
         for (generation, outcome) in self.worker.poll() {
-            if let Outcome::Version(v) = outcome {
-                self.git_version = Some(v);
-                continue;
-            }
+            let outcome = match outcome {
+                Outcome::Version(v) => {
+                    self.git_version = Some(v);
+                    continue;
+                }
+                Outcome::CommitDetails { id, result } => {
+                    if let Some(d) = self.details.as_mut().filter(|d| d.id == id) {
+                        match result {
+                            Ok((message, files)) => {
+                                d.message = Some(message);
+                                d.files = Some(files);
+                            }
+                            Err(e) => d.error = Some(error_text(&e)),
+                        }
+                    }
+                    continue;
+                }
+                Outcome::Diff { key, result } => {
+                    if let Some(s) = self.diff.as_mut().filter(|s| s.key == key) {
+                        match result {
+                            Ok(diff) => s.prepared = Some(Prepared::new(s.title.clone(), &diff)),
+                            Err(e) => s.error = Some(error_text(&e)),
+                        }
+                    }
+                    continue;
+                }
+                other => other,
+            };
             if generation != self.generation {
                 continue;
             }
@@ -254,10 +329,15 @@ impl RepoWindow {
                 }
                 Outcome::Refreshed(snapshot) => self.refreshed(*snapshot, ctx),
                 Outcome::Failed(e) => self.error = Some(error_text(&e)),
-                Outcome::Version(_) => {}
+                Outcome::Version(_) | Outcome::CommitDetails { .. } | Outcome::Diff { .. } => {}
             }
         }
         self.history.poll();
+        self.search.poll();
+        if self.search.jump_pending && self.first_match().is_some() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
+        }
         // Nothing selected yet: the commit at HEAD once it has loaded.
         if self.selection == Selection::None
             && let Some(head) = self.status().and_then(head_commit)
@@ -294,6 +374,7 @@ impl RepoWindow {
         self.handle_input(&ctx);
         let t = theme::tokens(&ctx);
         self.settings_window(&ctx);
+        self.keys_window(&ctx);
 
         egui::Panel::top("werkzeugzeile").show(ui, |ui| self.toolbar(ui));
         if let Some(error) = &self.error {
@@ -329,8 +410,17 @@ impl RepoWindow {
                     .as_ref()
                     .map(|s| (s.refs.as_slice(), s.stashes.as_slice()))
                     .unwrap_or_default();
-                if let Some(id) = self.sidebar.show(ui, t, refs, stashes) {
-                    self.select_commit(id);
+                let wip = self.wip().map(|w| w.changed + w.staged + w.conflicts);
+                let history = &self.history;
+                let lane = |id: &Oid| history.color_of(id).map(|c| t.lanes[c % t.lanes.len()]);
+                match self.sidebar.show(ui, t, refs, stashes, wip, &lane) {
+                    Some(Pick::Commit(id)) => self.select_commit(id),
+                    Some(Pick::WorkInProgress) => {
+                        self.diff = None;
+                        self.selection = Selection::WorkInProgress;
+                        self.history.scroll_to(0);
+                    }
+                    None => {}
                 }
             });
         egui::Panel::right("details")
@@ -338,11 +428,101 @@ impl RepoWindow {
             .default_size(340.0)
             .min_size(220.0)
             .show(ui, |ui| self.details(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.history_view(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.diff.is_some() {
+                self.diff_view(ui);
+            } else {
+                self.history_view(ui);
+            }
+        });
+        self.ensure_details(&ctx);
+    }
+
+    /// Starts loading message and files of the selected commit when they are not there yet.
+    fn ensure_details(&mut self, ctx: &egui::Context) {
+        let Selection::Commit(id) = &self.selection else {
+            return;
+        };
+        if self.details.as_ref().is_some_and(|d| &d.id == id) {
+            return;
+        }
+        let (Some(repo), Some(commit)) = (self.repo.clone(), self.history.commit(id).cloned())
+        else {
+            return;
+        };
+        self.details = Some(Details {
+            id: id.clone(),
+            message: None,
+            files: None,
+            error: None,
+        });
+        let _ = self.worker.start(
+            DETAIL_JOB,
+            Job::CommitDetails(repo, Box::new(commit)),
+            self.runner.clone(),
+            ctx.clone(),
+        );
+    }
+
+    /// Shows the diff `key` in the centre (loading in the background).
+    fn open_diff(&mut self, key: DiffKey, title: String, ctx: &egui::Context) {
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let keep = self
+            .diff
+            .take()
+            .filter(|s| s.key == key)
+            .and_then(|s| s.prepared);
+        self.diff = Some(DiffState {
+            key: key.clone(),
+            title,
+            prepared: keep,
+            error: None,
+        });
+        if let Err(e) = self.worker.start(
+            DETAIL_JOB,
+            Job::Diff(repo, key),
+            self.runner.clone(),
+            ctx.clone(),
+        ) && let Some(s) = self.diff.as_mut()
+        {
+            s.error = Some(trf(
+                "Git konnte nicht gestartet werden: {fehler}",
+                &[("fehler", &e)],
+            ));
+        }
+    }
+
+    fn diff_view(&mut self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui.ctx());
+        let Some(state) = self.diff.as_mut() else {
+            return;
+        };
+        let back = match (&mut state.prepared, &state.error) {
+            (_, Some(e)) => {
+                let back = ui.button(tr("Zurück zum Graphen")).clicked();
+                ui.label(RichText::new(e).color(t.error_text));
+                back
+            }
+            (Some(prepared), None) => prepared.show(ui, t),
+            (None, None) => {
+                let back = ui.button(tr("Zurück zum Graphen")).clicked();
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new(tr("Lade Diff …")).color(t.text_dim));
+                });
+                back
+            }
+        };
+        if back {
+            self.diff = None;
+        }
     }
 
     /// Selects a commit and scrolls the history to it (if it has loaded).
     fn select_commit(&mut self, id: Oid) {
+        self.diff = None;
         self.selection = Selection::Commit(id);
         let wip = self.wip().is_some();
         if let Some(row) = self.history.row_of(&self.selection, wip) {
@@ -352,9 +532,40 @@ impl RepoWindow {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
+        if (self.diff.is_some() || self.search.open)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            // The innermost first: an open diff, then the search.
+            if self.diff.is_some() {
+                self.diff = None;
+            } else {
+                self.search.close();
+            }
+        }
+        let (find, previous, next) = ctx.input_mut(|i| {
+            // Shift+F3 first, so that it does not also count as F3.
+            let find = i.consume_shortcut(&FIND);
+            let previous = i.consume_shortcut(&PREVIOUS);
+            let next = i.consume_shortcut(&NEXT);
+            if i.consume_shortcut(&KEYS) {
+                self.show_keys = !self.show_keys;
+            }
+            (find, previous, next)
+        });
+        if find && self.repo.is_some() {
+            self.diff = None;
+            self.search.open();
+        }
+        if next {
+            self.jump(true);
+        }
+        if previous {
+            self.jump(false);
+        }
+        let in_diff = self.diff.is_some();
         let (open, refresh, copy, focused, dropped, step) = ctx.input_mut(|i| {
             let mut step: i64 = 0;
-            if !typing {
+            if !typing && !in_diff {
                 for (key, n) in [
                     (Key::ArrowDown, 1),
                     (Key::ArrowUp, -1),
@@ -431,43 +642,78 @@ impl RepoWindow {
         let t = theme::tokens(&ctx);
         ui.horizontal(|ui| {
             if let (Some(repo), Some(status)) = (&self.repo, self.status()) {
-                toolbar::caption(
+                let hint = format!(
+                    "{}\n{}",
+                    shown_path(repo.workdir()),
+                    shortcut_hint(&ctx, tr("Anderes Repository öffnen"), &OPEN)
+                );
+                let repo_clicked = toolbar::caption(
                     ui,
                     t,
                     tr("Repository"),
                     &repo_name(repo.workdir()),
-                    &shown_path(repo.workdir()),
-                );
+                    &hint,
+                    true,
+                )
+                .clicked();
                 toolbar::caption(
                     ui,
                     t,
                     tr("Branch"),
                     &branch_name(&status.head),
                     &format!("{} · {}", head_text(&status.head), upstream_text(status)),
+                    false,
                 );
                 ui.separator();
-            }
-            toolbar::coming(ui, t);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let refresh = ui
-                    .add_enabled(
-                        self.repo.is_some() && !self.is_busy(),
-                        egui::Button::new(tr("Aktualisieren")),
-                    )
-                    .on_hover_text(shortcut_hint(&ctx, tr("Status neu lesen"), &REFRESH));
-                if refresh.clicked() {
-                    self.refresh(&ctx);
+                if repo_clicked {
+                    self.pick_folder(&ctx);
                 }
-                if ui.button(tr("Einstellungen")).clicked() {
+            }
+            let (behind, ahead) = self
+                .status()
+                .and_then(|s| s.upstream.as_ref())
+                .and_then(|u| u.ahead_behind)
+                .map_or((0, 0), |(a, b)| (b, a));
+            toolbar::coming(ui, t, behind, ahead);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if toolbar::button(
+                    ui,
+                    t,
+                    toolbar::Icon::Settings,
+                    tr("Einstellungen"),
+                    true,
+                    None,
+                )
+                .clicked()
+                {
                     self.show_settings = !self.show_settings;
                 }
-                let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
-                    &ctx,
-                    tr("Repository öffnen"),
-                    &OPEN,
-                ));
-                if open.clicked() {
-                    self.pick_folder(&ctx);
+                toolbar::button(ui, t, toolbar::Icon::Commands, tr("Befehle"), false, None)
+                    .on_hover_text(trf("Kommt mit Version {v}", &[("v", &"0.8")]));
+                let search = ui.add_enabled(
+                    self.repo.is_some(),
+                    egui::Button::new(
+                        RichText::new(trf(
+                            "Commits suchen ({taste})",
+                            &[("taste", &ctx.format_shortcut(&FIND))],
+                        ))
+                        .color(t.text_dim),
+                    )
+                    .min_size(egui::vec2(190.0, 26.0)),
+                );
+                if search.clicked() {
+                    self.diff = None;
+                    self.search.open();
+                }
+                if self.repo.is_none() {
+                    let open = ui.button(tr("Öffnen …")).on_hover_text(shortcut_hint(
+                        &ctx,
+                        tr("Repository öffnen"),
+                        &OPEN,
+                    ));
+                    if open.clicked() {
+                        self.pick_folder(&ctx);
+                    }
                 }
                 if let Some(busy) = &self.busy {
                     let text = match busy {
@@ -514,7 +760,12 @@ impl RepoWindow {
 
     fn status_line(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
+        let zoom = (ui.ctx().zoom_factor() * 100.0).round();
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            if let Some(repo) = &self.repo {
+                ui.add(egui::Label::new(RichText::new(shown_path(repo.workdir())).color(t.text_dim)).truncate());
+                ui.label(RichText::new("·").color(t.text_dim));
+            }
             if let Some(status) = self.status() {
                 let text = trf(
                     "Konflikte {konflikte} · Vorgemerkt {vorgemerkt} · Geändert {geaendert} · Unversioniert {neu}",
@@ -527,26 +778,100 @@ impl RepoWindow {
                 );
                 ui.label(RichText::new(text).color(t.text_dim));
             }
-            if self.repo.is_some() {
-                let n = self.history.commits().len();
-                let text = if self.history.is_loading() {
-                    trf("{n} Commits geladen …", &[("n", &n)])
-                } else {
-                    trf("{n} Commits", &[("n", &n)])
-                };
-                ui.label(RichText::new("·").color(t.text_dim));
-                ui.label(RichText::new(text).color(t.text_dim));
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(v) = self.git_version {
                     ui.label(RichText::new(format!("git {v}")).color(t.text_dim));
+                    ui.label(RichText::new("·").color(t.text_dim));
+                }
+                if ui
+                    .add(egui::Label::new(RichText::new(tr("F1: Tastenkürzel")).color(t.text_dim)).sense(egui::Sense::click()))
+                    .clicked()
+                {
+                    self.show_keys = !self.show_keys;
+                }
+                ui.label(RichText::new("·").color(t.text_dim));
+                ui.label(RichText::new(trf("Zoom {p} %", &[("p", &zoom)])).color(t.text_dim))
+                    .on_hover_text(tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0"));
+                if self.repo.is_some() {
+                    let n = self.history.commits().len();
+                    let text = if self.history.is_loading() {
+                        trf("{n} Commits geladen …", &[("n", &n)])
+                    } else {
+                        trf("{n} Commits", &[("n", &n)])
+                    };
+                    ui.label(RichText::new("·").color(t.text_dim));
+                    ui.label(RichText::new(text).color(t.text_dim));
                 }
             });
         });
     }
 
+    /// The list of keyboard shortcuts (F1).
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_keys;
+        egui::Window::new(tr("Tastenkürzel"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 90.0])
+            .show(ctx, |ui| {
+                let t = theme::tokens(ui.ctx());
+                let f = |s: &KeyboardShortcut| ctx.format_shortcut(s);
+                let rows: Vec<(String, &str)> = vec![
+                    (f(&OPEN), "Repository öffnen"),
+                    (f(&REFRESH), "Status neu lesen"),
+                    (f(&FIND), "Historie durchsuchen"),
+                    (
+                        format!("{} / {}", f(&NEXT), f(&PREVIOUS)),
+                        "Nächster / vorheriger Treffer",
+                    ),
+                    (
+                        tr("Pfeil hoch/runter, Bild hoch/runter, Pos1, Ende").to_owned(),
+                        "Commit wählen",
+                    ),
+                    (f(&COPY), "Commit-ID kopieren"),
+                    ("Esc".to_owned(), "Diff oder Suche schließen"),
+                    (tr("Ctrl+Plus, Ctrl+Minus, Ctrl+0").to_owned(), "Zoom"),
+                    (f(&KEYS), "Diese Übersicht"),
+                ];
+                egui::Grid::new("tastenkuerzel")
+                    .num_columns(2)
+                    .spacing([24.0, 6.0])
+                    .show(ui, |ui| {
+                        for (keys, what) in rows {
+                            ui.label(RichText::new(keys).monospace().color(t.text_strong));
+                            ui.label(tr(what));
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                if ui.link(tr("GitCraft unterstützen …")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(SPONSOR_URL));
+                }
+            });
+        self.show_keys = open;
+    }
+
     fn history_view(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
+        if self.search.open {
+            let (position, count) = self.match_position();
+            let (action, run) = self.search.bar(ui, t, position, count);
+            if let Some(e) = self.search.error() {
+                ui.label(RichText::new(error_text(e)).color(t.error_text));
+            }
+            if run && let Some(repo) = self.repo.clone() {
+                self.search.run(&repo, ui.ctx());
+                self.collect_search_now();
+            }
+            match action {
+                Some(BarAction::Next) => self.jump(true),
+                Some(BarAction::Previous) => self.jump(false),
+                Some(BarAction::Close) => self.search.close(),
+                None => {}
+            }
+            ui.add_space(2.0);
+        }
         if let Some(e) = self.history.error() {
             ui.label(RichText::new(error_text(e)).color(t.error_text));
         }
@@ -572,6 +897,7 @@ impl RepoWindow {
         let view = View {
             labels: &self.labels,
             avatars: &self.avatars,
+            search: Some(&self.search),
             wip,
             head: head.as_ref(),
             now,
@@ -662,6 +988,8 @@ impl RepoWindow {
                         });
                         ui.end_row();
                     });
+                ui.add_space(8.0);
+                self.commit_body(ui, t, &c);
             }
             Selection::None => {
                 ui.label(RichText::new(tr("Nichts ausgewählt")).color(t.text_dim));
@@ -669,10 +997,98 @@ impl RepoWindow {
         }
     }
 
-    /// The change list of the work in progress (staging comes in milestone 0.3).
+    /// Full message and changed files of the selected commit; a click on a file shows its diff.
+    fn commit_body(&mut self, ui: &mut egui::Ui, t: &theme::Tokens, commit: &gitcraft_git::Commit) {
+        let Some(details) = self.details.as_ref().filter(|d| d.id == commit.id) else {
+            return;
+        };
+        if let Some(e) = &details.error {
+            ui.label(RichText::new(e).color(t.error_text));
+            return;
+        }
+        let (Some(message), Some(files)) = (&details.message, &details.files) else {
+            ui.add(egui::Spinner::new());
+            return;
+        };
+        // The body (the subject is the heading already).
+        let body = message.split_once('\n').map_or("", |(_, b)| b.trim());
+        if !body.is_empty() {
+            ui.add(egui::Label::new(RichText::new(escape_message(body)).color(t.text)).wrap());
+            ui.add_space(8.0);
+        }
+        ui.label(
+            RichText::new(if files.len() == 1 {
+                tr("1 Datei geändert").to_owned()
+            } else {
+                trf("{n} Dateien geändert", &[("n", &files.len())])
+            })
+            .color(t.text_strong),
+        );
+        let current = self.diff.as_ref().map(|s| s.key.clone());
+        let mut open = None;
+        for (i, f) in files.iter().enumerate() {
+            let key = DiffKey::Commit {
+                commit: Box::new(commit.clone()),
+                file: f.clone(),
+            };
+            let path = match &f.old_path {
+                Some(old) => format!("{} -> {}", old.display(), f.path.display()),
+                None => f.path.display(),
+            };
+            let (letter, color, meaning) = match f.status {
+                FileStatus::Added => ('A', t.added, "hinzugefügt"),
+                FileStatus::Modified => ('M', t.modified, "geändert"),
+                FileStatus::Deleted => ('D', t.deleted, "gelöscht"),
+                FileStatus::Renamed => ('R', t.renamed, "umbenannt"),
+            };
+            let row_h = ui.text_style_height(&egui::TextStyle::Body).max(20.0);
+            let inner = ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_h),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    if Some(&key) == current.as_ref() {
+                        ui.painter().rect_filled(ui.max_rect(), 0.0, t.selection);
+                    }
+                    let counts = match f.lines {
+                        Some((a, d)) => format!("+{a} -{d}"),
+                        None => tr("binär").to_owned(),
+                    };
+                    egui::Sides::new().shrink_left().show(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(letter.to_string()).monospace().color(color))
+                                .on_hover_text(tr(meaning));
+                            ui.add(egui::Label::new(path.as_str()).truncate());
+                        },
+                        |ui| {
+                            ui.label(RichText::new(counts).color(t.text_dim).size(12.0));
+                        },
+                    );
+                },
+            );
+            let resp = ui.interact(
+                inner.response.rect,
+                ui.scope_id().with(("file", i)),
+                egui::Sense::click(),
+            );
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &path));
+            if resp.clicked() {
+                open = Some((key, path));
+            }
+        }
+        if let Some((key, title)) = open {
+            let ctx = ui.ctx().clone();
+            self.open_diff(key, title, &ctx);
+        }
+    }
+
+    /// The change list of the work in progress (staging comes in milestone 0.3). A click on a
+    /// file shows its diff.
     fn changes(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
         let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
+        let current = self.diff.as_ref().map(|s| s.key.clone());
+        let mut open: Option<(DiffKey, String)> = None;
         let rows = &self.rows;
         egui::ScrollArea::vertical()
             .id_salt("changes")
@@ -680,15 +1096,97 @@ impl RepoWindow {
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for (i, row) in rows.iter().enumerate().skip(range.start).take(range.len()) {
                     let size = egui::vec2(ui.available_width(), row_h);
-                    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                        // Stripes on file rows only, so section titles stand apart.
-                        if i % 2 == 1 && matches!(row, Row::File { .. }) {
+                    let inner = ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                        let selected = matches!(row, Row::File { diff: Some(k), .. } if Some(k) == current.as_ref());
+                        if selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, t.selection);
+                        } else if i % 2 == 1 && matches!(row, Row::File { .. }) {
+                            // Stripes on file rows only, so section titles stand apart.
                             ui.painter().rect_filled(ui.max_rect(), 0.0, t.row_alt);
                         }
                         draw_row(ui, row, t);
                     });
+                    if let Row::File { diff: Some(key), path, .. } = row {
+                        let resp = ui.interact(inner.response.rect, ui.scope_id().with(("change", i)), egui::Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, path));
+                        if resp.clicked() {
+                            open = Some((key.clone(), path.clone()));
+                        }
+                    }
                 }
             });
+        if let Some((key, title)) = open {
+            let ctx = ui.ctx().clone();
+            self.open_diff(key, title, &ctx);
+        }
+    }
+
+    /// Commit indices (in the loaded history) that match the active search.
+    fn match_indices(&self) -> Vec<usize> {
+        if !self.search.active() {
+            return Vec::new();
+        }
+        self.history
+            .commits()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.search.is_match(c))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The selected commit's number among the matches, and the number of matches.
+    fn match_position(&self) -> (Option<usize>, usize) {
+        let matches = self.match_indices();
+        let selected = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let position = selected.and_then(|s| matches.iter().position(|m| *m == s).map(|p| p + 1));
+        (position, matches.len())
+    }
+
+    fn first_match(&self) -> Option<usize> {
+        self.match_indices().first().copied()
+    }
+
+    /// Selects the commit at index `i` of the history and scrolls to it.
+    fn jump_to(&mut self, i: Option<usize>) {
+        let Some(commit) = i.and_then(|i| self.history.commits().get(i)) else {
+            return;
+        };
+        self.select_commit(commit.id.clone());
+    }
+
+    /// The next (or previous) match after the selection; wraps around in the loaded history
+    /// and asks for more history while it is still loading.
+    fn jump(&mut self, forward: bool) {
+        let matches = self.match_indices();
+        if self.history.is_loading() {
+            self.history.load_more();
+        }
+        if matches.is_empty() {
+            return;
+        }
+        let current = match &self.selection {
+            Selection::Commit(id) => self.history.position(id),
+            _ => None,
+        };
+        let target = match (current, forward) {
+            (Some(c), true) => matches.iter().find(|m| **m > c).or(matches.first()),
+            (Some(c), false) => matches.iter().rev().find(|m| **m < c).or(matches.last()),
+            (None, true) => matches.first(),
+            (None, false) => matches.last(),
+        };
+        self.jump_to(target.copied());
+    }
+
+    /// Commit-ID searches need no git: jump right away.
+    fn collect_search_now(&mut self) {
+        if self.search.jump_pending && !self.search.is_running() {
+            self.search.jump_pending = false;
+            self.jump_to(self.first_match());
+        }
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
@@ -724,6 +1222,12 @@ fn branch_name(head: &Head) -> String {
     }
 }
 
+/// A commit message for display: line breaks kept, other control and invisible characters
+/// escaped.
+fn escape_message(text: &str) -> String {
+    text.split('\n').map(escape).collect::<Vec<_>>().join("\n")
+}
+
 /// The commit HEAD points at, if any.
 fn head_commit(status: &Status) -> Option<Oid> {
     match &status.head {
@@ -743,6 +1247,7 @@ fn draw_row(ui: &mut egui::Ui, row: &Row, t: &theme::Tokens) {
             tone,
             meaning,
             path,
+            ..
         } => {
             let colour = match tone {
                 Tone::Added => t.added,
@@ -817,7 +1322,7 @@ fn upstream_text(status: &Status) -> String {
     }
 }
 
-fn change_row(file: &FileChange, change: Change) -> Row {
+fn change_row(file: &FileChange, change: Change, staged: bool) -> Row {
     let (tone, meaning) = match change {
         Change::Added => (Tone::Added, "hinzugefügt"),
         Change::Modified => (Tone::Modified, "geändert"),
@@ -837,6 +1342,11 @@ fn change_row(file: &FileChange, change: Change) -> Row {
         tone,
         meaning,
         path,
+        diff: Some(DiffKey::Worktree {
+            path: file.path.clone(),
+            old: file.orig_path.clone(),
+            staged,
+        }),
     }
 }
 
@@ -873,17 +1383,24 @@ fn rows(status: &Status) -> Vec<Row> {
                 letter: 'U',
                 tone: Tone::Conflict,
                 meaning: conflict_meaning(c),
+                diff: None,
                 path: f.path.display(),
             })
             .collect(),
     );
     section(
         "Vorgemerkt",
-        status.staged().map(|(f, c)| change_row(f, c)).collect(),
+        status
+            .staged()
+            .map(|(f, c)| change_row(f, c, true))
+            .collect(),
     );
     section(
         "Nicht vorgemerkt",
-        status.unstaged().map(|(f, c)| change_row(f, c)).collect(),
+        status
+            .unstaged()
+            .map(|(f, c)| change_row(f, c, false))
+            .collect(),
     );
     section(
         "Unversioniert",
@@ -893,6 +1410,9 @@ fn rows(status: &Status) -> Vec<Row> {
                 letter: '?',
                 tone: Tone::Untracked,
                 meaning: "unversioniert",
+                diff: Some(DiffKey::Untracked {
+                    path: f.path.clone(),
+                }),
                 path: f.path.display(),
             })
             .collect(),
