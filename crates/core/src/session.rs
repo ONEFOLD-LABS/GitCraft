@@ -29,6 +29,8 @@ pub struct Snapshot {
     pub refs: Vec<Ref>,
     pub stashes: Vec<Stash>,
     pub remotes: Vec<Remote>,
+    /// Where a shallow repository's history is cut; empty when it is complete.
+    pub shallow: Vec<Oid>,
 }
 
 impl Snapshot {
@@ -38,6 +40,7 @@ impl Snapshot {
             refs: repo.refs()?,
             stashes: repo.stashes()?,
             remotes: repo.remotes()?,
+            shallow: repo.shallow_boundary()?,
         })
     }
 }
@@ -235,6 +238,17 @@ pub enum Command {
         remote: String,
         tag: Option<String>,
     },
+    /// Let a local branch track a remote (or local) branch, given as full ref name
+    /// (`branch --set-upstream-to`).
+    SetUpstream {
+        branch: String,
+        upstream: String,
+    },
+    /// Let a branch track nothing (`branch --unset-upstream`).
+    UnsetUpstream(String),
+    /// Fetch more history of a shallow repository: `n` commits (`fetch --deepen=<n>`), or all
+    /// (`fetch --unshallow`).
+    Deepen(Option<u32>),
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -323,6 +337,9 @@ impl Command {
             | Command::Pull(_)
             | Command::Push { .. }
             | Command::PushTags { .. }
+            | Command::SetUpstream { .. }
+            | Command::UnsetUpstream(_)
+            | Command::Deepen(_)
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -842,6 +859,11 @@ fn run(
         Command::PushTags { remote, tag } => {
             Outcome::Pushed(repo.push_tags(remote, tag.as_deref(), cancel, on_progress)?)
         }
+        Command::SetUpstream { branch, upstream } => {
+            Outcome::Written(repo.set_upstream(branch, upstream, cancel)?)
+        }
+        Command::UnsetUpstream(branch) => Outcome::Written(repo.unset_upstream(branch, cancel)?),
+        Command::Deepen(by) => Outcome::Written(repo.deepen(*by, cancel, on_progress)?),
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {
             message,
