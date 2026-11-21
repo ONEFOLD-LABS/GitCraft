@@ -5,7 +5,7 @@ use crate::branch::NameProblem;
 use crate::{Cancel, GitError, Oid, Repository};
 
 impl Repository {
-    fn tag_name_ok(&self, name: &str) -> Result<(), GitError> {
+    pub(crate) fn tag_name_ok(&self, name: &str) -> Result<(), GitError> {
         let problem = if name.is_empty() {
             Some(NameProblem::Empty)
         } else if name.starts_with('-') {

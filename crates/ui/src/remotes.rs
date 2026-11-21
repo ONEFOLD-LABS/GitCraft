@@ -4,10 +4,10 @@
 
 use egui::RichText;
 use gitcraft_core::Command;
-use gitcraft_git::PullMode;
+use gitcraft_git::{Loss, Oid, PullMode};
 use gitcraft_git::{UrlProblem, check_url, escape, redact_url};
 
-use crate::branches::{Decision, name_hint};
+use crate::branches::{Decision, danger, loss_list, name_hint};
 use crate::i18n::{tr, trf};
 use crate::theme::Tokens;
 
@@ -35,6 +35,20 @@ pub(crate) enum Dialog {
     /// Move the password in the URL into the credential helper.
     MoveCredentials {
         name: String,
+    },
+    /// The first push of a branch: to which remote (its upstream afterwards).
+    FirstPush {
+        branch: String,
+        remotes: Vec<String>,
+        chosen: String,
+    },
+    /// The remote refused a push because it has commits the branch lacks.
+    Rejected {
+        branch: String,
+    },
+    /// A forced push: what it removes from the remote; `None` while that is read.
+    Force {
+        info: Option<(String, Option<Oid>, Loss)>,
     },
     /// A fast-forward pull is not possible; merge or rebase must be chosen.
     Diverged {
@@ -89,6 +103,9 @@ impl Dialog {
             Dialog::Remove { .. } => "Remote entfernen?",
             Dialog::MoveCredentials { .. } => "Zugangsdaten aus der URL nehmen",
             Dialog::Diverged { .. } => "Vorspulen nicht möglich",
+            Dialog::FirstPush { .. } => "Branch zum ersten Mal hochladen",
+            Dialog::Rejected { .. } => "Push abgelehnt",
+            Dialog::Force { .. } => "Force-Push?",
         }
     }
 
@@ -260,6 +277,120 @@ impl Dialog {
                 ui.horizontal(|ui| {
                     if ui.button(tr("Verschieben")).clicked() {
                         decision = Decision::Run(Command::MoveCredentials(name.clone()));
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::FirstPush {
+                branch,
+                remotes,
+                chosen,
+            } => {
+                ui.label(trf(
+                    "{branch} gibt es auf dem Remote noch nicht. Der Push legt ihn dort an und setzt ihn als Upstream, so dass Pull und Push danach wissen, wohin.",
+                    &[("branch", &escape(branch))],
+                ));
+                if remotes.len() > 1 {
+                    let l = ui.label(tr("Remote"));
+                    egui::ComboBox::from_id_salt("push-remote")
+                        .selected_text(escape(chosen))
+                        .show_ui(ui, |ui| {
+                            for r in remotes.iter() {
+                                ui.selectable_value(chosen, r.clone(), escape(r));
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id);
+                }
+                ui.horizontal(|ui| {
+                    let label = trf(
+                        "Nach {remote}/{branch} pushen",
+                        &[("remote", &escape(chosen)), ("branch", &escape(branch))],
+                    );
+                    if ui.button(label).clicked() {
+                        decision = Decision::Run(Command::Push {
+                            remote: Some(chosen.clone()),
+                            lease: None,
+                        });
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::Rejected { branch } => {
+                ui.label(trf(
+                    "Der Remote hat Commits auf {branch}, die dir lokal fehlen; ein normaler Push würde sie überschreiben und wurde abgelehnt. Nichts wurde geändert.",
+                    &[("branch", &escape(branch))],
+                ));
+                ui.label(
+                    RichText::new(tr(
+                        "Hole sie zuerst mit Pull und pushe dann noch einmal. Ein Force-Push ersetzt den Stand auf dem Remote durch deinen.",
+                    ))
+                    .color(t.text_dim),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Pull")).clicked() {
+                        decision = Decision::Run(Command::Pull(PullMode::FastForward));
+                    }
+                    if ui.button(tr("Force-Push …")).clicked() {
+                        decision = Decision::Run(Command::PushInfo(None));
+                    }
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                });
+            }
+            Dialog::Force { info } => {
+                let Some((target, expected, loss)) = info else {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label(tr("Prüfe, was auf dem Remote verloren ginge …"));
+                    });
+                    if ui.button(tr("Abbrechen")).clicked() {
+                        decision = Decision::Close;
+                    }
+                    return decision;
+                };
+                if loss.total == 0 {
+                    ui.label(trf(
+                        "Ersetzt {ziel} durch deinen Stand. Nach dem letzten Fetch geht dort kein Commit verloren.",
+                        &[("ziel", &escape(target))],
+                    ));
+                } else {
+                    let text = if loss.total == 1 {
+                        trf(
+                            "Ersetzt {ziel} durch deinen Stand. Dieser Commit verschwindet vom Remote:",
+                            &[("ziel", &escape(target))],
+                        )
+                    } else {
+                        trf(
+                            "Ersetzt {ziel} durch deinen Stand. Diese {n} Commits verschwinden vom Remote:",
+                            &[("ziel", &escape(target)), ("n", &loss.total)],
+                        )
+                    };
+                    ui.label(text);
+                    loss_list(ui, t, loss);
+                }
+                let lease = match expected {
+                    Some(id) => trf(
+                        "Nur solange der Remote noch bei {id} steht: Kam seitdem etwas dazu, bricht der Push ab, ohne etwas zu überschreiben.",
+                        &[("id", &id.short())],
+                    ),
+                    None => tr(
+                        "Nur solange es den Branch auf dem Remote nicht gibt: Entsteht er seitdem, bricht der Push ab.",
+                    )
+                    .to_owned(),
+                };
+                ui.label(RichText::new(lease).color(t.text_dim));
+                ui.horizontal(|ui| {
+                    if ui.add(danger(t, tr("Überschreiben"))).clicked() {
+                        decision = Decision::Run(Command::Push {
+                            remote: None,
+                            lease: Some(expected.clone()),
+                        });
                     }
                     if ui.button(tr("Abbrechen")).clicked() {
                         decision = Decision::Close;

@@ -2201,3 +2201,119 @@ fn a_cancelled_fetch_leaves_the_repository_consistent() {
     f.git(&["fsck", "--no-progress"]);
     assert!(repo.status().is_ok());
 }
+
+fn remote_tip(f: &Fixture, branch: &str) -> String {
+    let out = f
+        .command(&f.tmp.path().join("up.git"))
+        .args(["rev-parse", "--verify", "--quiet", branch])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn push_sets_the_upstream_once_and_explains_rejections() {
+    let f = with_remote();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    // A new branch: the first push sets its upstream.
+    f.git(&["switch", "-q", "-c", "feature"]);
+    f.write("f.txt", "f\n");
+    f.commit_all("f");
+    let target = repo.push_target(None).unwrap();
+    assert!(target.first);
+    assert_eq!(
+        (target.remote.as_str(), target.merge.as_str()),
+        ("origin", "refs/heads/feature")
+    );
+    let pushed = repo.push(&target, None, &cancel, no_progress()).unwrap();
+    assert_eq!(pushed[0].flag, gitcraft_git::PushFlag::New);
+    assert_eq!(remote_tip(&f, "feature"), f.head());
+    let target = repo.push_target(None).unwrap();
+    assert!(!target.first, "upstream set");
+
+    // The remote moved on: rejected, nothing overwritten.
+    f.git(&["switch", "-q", "main"]);
+    f.push_from_other("b.txt", "2\n");
+    let remote_before = remote_tip(&f, "main");
+    f.write("c.txt", "3\n");
+    f.commit_all("lokal");
+    let target = repo.push_target(None).unwrap();
+    match repo.push(&target, None, &cancel, no_progress()) {
+        Err(GitError::PushRejected(refs)) => {
+            assert_eq!(refs[0].0, "refs/heads/main");
+            assert_eq!(refs[0].1, gitcraft_git::Rejection::NonFastForward);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(remote_tip(&f, "main"), remote_before);
+}
+
+#[test]
+fn force_push_only_overwrites_what_was_shown() {
+    let f = with_remote();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    f.push_from_other("b.txt", "2\n");
+    f.write("c.txt", "3\n");
+    f.commit_all("lokal");
+    repo.fetch(Some("origin"), false, &cancel, no_progress())
+        .unwrap();
+    let target = repo.push_target(None).unwrap();
+    let loss = repo.force_loss(&target).unwrap();
+    assert_eq!(loss.total, 1);
+    assert_eq!(loss.commits[0].subject, "b.txt");
+
+    // Someone pushes again after the user saw the loss: the lease fails.
+    f.push_from_other("d.txt", "4\n");
+    match repo.push(
+        &target,
+        Some(target.tracking.clone()),
+        &cancel,
+        no_progress(),
+    ) {
+        Err(GitError::PushRejected(refs)) => {
+            assert_eq!(refs[0].1, gitcraft_git::Rejection::Stale)
+        }
+        other => panic!("{other:?}"),
+    }
+    // After a fetch, the new loss names both commits, and the forced push goes through.
+    repo.fetch(Some("origin"), false, &cancel, no_progress())
+        .unwrap();
+    let target = repo.push_target(None).unwrap();
+    assert_eq!(repo.force_loss(&target).unwrap().total, 2);
+    let pushed = repo
+        .push(
+            &target,
+            Some(target.tracking.clone()),
+            &cancel,
+            no_progress(),
+        )
+        .unwrap();
+    assert_eq!(pushed[0].flag, gitcraft_git::PushFlag::Forced);
+    assert_eq!(remote_tip(&f, "main"), f.head());
+}
+
+#[test]
+fn tags_are_pushed_one_or_all() {
+    let f = with_remote();
+    let repo = f.open();
+    let cancel = Cancel::new();
+    f.git(&["tag", "v1"]);
+    f.git(&["tag", "v2"]);
+    repo.push_tags("origin", Some("v1"), &cancel, no_progress())
+        .unwrap();
+    assert_eq!(remote_tip(&f, "refs/tags/v1"), f.head());
+    assert_eq!(remote_tip(&f, "refs/tags/v2"), "");
+    repo.push_tags("origin", None, &cancel, no_progress())
+        .unwrap();
+    assert_eq!(remote_tip(&f, "refs/tags/v2"), f.head());
+    assert!(matches!(
+        repo.push_tags("-x", None, &cancel, no_progress()),
+        Err(GitError::InvalidName { .. })
+    ));
+    assert!(matches!(
+        repo.push_tags("origin", Some("--mirror"), &cancel, no_progress()),
+        Err(GitError::InvalidName { .. })
+    ));
+}

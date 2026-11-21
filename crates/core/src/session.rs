@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use gitcraft_git::{
     Cancel, ChangedFile, CommandLog, Commit, Comparison, Discarded, FileDiff, GitError, GitRunner,
-    HeadPos, Identity, LogReader, Loss, Oid, OnProgress, Progress, PullMode, Ref, RefUpdate,
-    Remote, RepoPath, Repository, SearchKind, SearchStream, Stash, Status, TrustReport, Written,
+    HeadPos, Identity, LogReader, Loss, Oid, OnProgress, Progress, PullMode, PushTarget, PushedRef,
+    Ref, RefUpdate, Remote, RepoPath, Repository, SearchKind, SearchStream, Stash, Status,
+    TrustReport, Written,
 };
 
 /// Called from worker threads when an event is waiting (the UI asks for a repaint).
@@ -219,6 +220,21 @@ pub enum Command {
     /// Pull the upstream of the current branch the chosen way (`pull --progress
     /// --no-rebase --ff-only | --no-rebase --ff --no-edit | --rebase`).
     Pull(PullMode),
+    /// Where a push of the current branch would go (`remote` for a first push, else the
+    /// upstream) and what a forced push there would overwrite (`config --get`, `log`).
+    PushInfo(Option<String>),
+    /// Push the current branch (`push --progress --porcelain [--set-upstream]
+    /// [--force-with-lease=<ref>:<commit>] <remote> <branch>:<ref>`); with `lease` forced, but
+    /// only while the remote branch is still at that commit.
+    Push {
+        remote: Option<String>,
+        lease: Option<Option<Oid>>,
+    },
+    /// Push one tag or all (`push --progress --porcelain [--tags] <remote> [refs/tags/<t>]`).
+    PushTags {
+        remote: String,
+        tag: Option<String>,
+    },
     /// A commit by id, e.g. a stash (`log -1`).
     LoadCommit(Oid),
     /// Commit the staged changes (`commit --file=- --cleanup=whitespace [--amend]
@@ -255,7 +271,8 @@ const COUNT: usize = 6;
 const LOSS: usize = 7;
 const LOAD: usize = 8;
 const COMPARE: usize = 9;
-const SLOTS: usize = 10;
+const PUSH_INFO: usize = 10;
+const SLOTS: usize = 11;
 
 impl Command {
     /// Changes the repository (runs in the write queue).
@@ -271,6 +288,7 @@ impl Command {
             | Command::BranchLoss(_)
             | Command::DetachedLoss
             | Command::LoadCommit(_)
+            | Command::PushInfo(_)
             | Command::Compare { .. } => false,
             Command::Stage(_)
             | Command::StageAll
@@ -303,6 +321,8 @@ impl Command {
             | Command::MoveCredentials(_)
             | Command::Fetch { .. }
             | Command::Pull(_)
+            | Command::Push { .. }
+            | Command::PushTags { .. }
             | Command::Commit { .. }
             | Command::SetIdentity { .. } => true,
             #[cfg(test)]
@@ -322,6 +342,7 @@ impl Command {
             Command::BranchLoss(_) | Command::DetachedLoss => Some(LOSS),
             Command::LoadCommit(_) => Some(LOAD),
             Command::Compare { .. } => Some(COMPARE),
+            Command::PushInfo(_) => Some(PUSH_INFO),
             _ => None,
         }
     }
@@ -372,6 +393,10 @@ pub enum Outcome {
         before: Option<Oid>,
         after: Option<Oid>,
     },
+    /// Where a push goes and what forcing it would overwrite.
+    PushInfo(Box<PushTarget>, Loss),
+    /// What a push did per ref.
+    Pushed(Vec<PushedRef>),
     /// A remote was removed; what it was.
     RemoteRemoved(Remote),
     Comparison(Box<Comparison>),
@@ -804,6 +829,18 @@ fn run(
                 before,
                 after: repo.head_commit()?,
             }
+        }
+        Command::PushInfo(remote) => {
+            let target = repo.push_target(remote.as_deref())?;
+            let loss = repo.force_loss(&target)?;
+            Outcome::PushInfo(Box::new(target), loss)
+        }
+        Command::Push { remote, lease } => {
+            let target = repo.push_target(remote.as_deref())?;
+            Outcome::Pushed(repo.push(&target, lease.clone(), cancel, on_progress)?)
+        }
+        Command::PushTags { remote, tag } => {
+            Outcome::Pushed(repo.push_tags(remote, tag.as_deref(), cancel, on_progress)?)
         }
         Command::LoadCommit(id) => Outcome::Commit(Box::new(repo.commit_by_id(id)?)),
         Command::Commit {
