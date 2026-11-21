@@ -458,3 +458,21 @@ OK	OK
 Rückfrage von Git	Question from Git
 Unbekannter SSH-Host	Unknown SSH host
 ssh kennt den Schlüssel von {host} noch nicht. Vergleiche den Fingerabdruck mit dem, den der Anbieter veröffentlicht:	ssh does not know the key of {host} yet. Compare the fingerprint with the one the provider publishes:
+Ablegen in	Put it in
+Branch (optional)	Branch (optional)
+Klonen	Clone
+Klonen …	Clone …
+Nur die neuesten Commits holen (flacher Klon); mehr Historie lässt sich später nachladen.	Get only the newest commits (shallow clone); more history can be fetched later.
+Ordner für den Klon wählen	Choose the folder for the clone
+Ordnername	Folder name
+Repository klonen	Clone repository
+Repository klonen …	Clone repository …
+Submodule werden nicht mitgeklont; GitCraft sagt danach, ob es welche gibt.	Submodules are not cloned along; GitCraft tells you afterwards whether there are any.
+Tiefe (optional)	Depth (optional)
+Wählen …	Choose …
+{ordner} geklont.	{ordner} cloned.
+{ordner} geklont. Es hat Submodule; sie wurden nicht mitgeklont (im Terminal: git submodule update --init --recursive).	{ordner} cloned. It has submodules; they were not cloned along (in a terminal: git submodule update --init --recursive).
+Den Ordner, in den geklont wird, gibt es nicht.	The folder to clone into does not exist.
+Der Ordnername fehlt oder ist ungültig.	The folder name is missing or invalid.
+Den Zielordner gibt es schon, und er ist nicht leer.	The target folder already exists and is not empty.
+Die Tiefe ist eine Zahl ab 1.	The depth is a number from 1.

@@ -7,6 +7,7 @@
 
 mod avatars;
 mod branches;
+mod clone;
 mod cmdlog;
 mod commit;
 mod compare;
@@ -195,6 +196,10 @@ pub struct RepoWindow {
     running: Option<network::Running>,
     /// Where git and ssh ask the user (the askpass bridge), when enabled.
     askpass: Option<gitcraft_core::askpass::Askpass>,
+    /// The clone dialog, while open.
+    clone: Option<clone::CloneDialog>,
+    /// Shown once the repository being opened is there (after a clone).
+    pending_notice: Option<String>,
     /// The open question from git, and those waiting behind it.
     prompt: Option<prompt::PromptDialog>,
     prompts: std::collections::VecDeque<gitcraft_core::askpass::Prompt>,
@@ -248,6 +253,8 @@ impl RepoWindow {
             remote_dialog: None,
             running: None,
             askpass: None,
+            clone: None,
+            pending_notice: None,
             prompt: None,
             prompts: std::collections::VecDeque::new(),
             extra_commit: None,
@@ -286,6 +293,43 @@ impl RepoWindow {
                     "Git kann in diesem Fenster nicht nach Passwörtern fragen: {fehler}",
                     &[("fehler", &escape(&e.to_string()))],
                 ));
+            }
+        }
+    }
+
+    /// Opens the clone dialog; the new folder goes next to the open repository by default.
+    fn start_clone(&mut self) {
+        let parent = self
+            .workdir()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        self.clone = Some(clone::CloneDialog::new(&parent));
+    }
+
+    fn clone_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.clone.as_mut() else {
+            return;
+        };
+        let t = theme::tokens(ctx);
+        match dialog.show(ctx, t, &self.runner, wake(ctx)) {
+            clone::CloneDecision::Open => {}
+            clone::CloneDecision::Close => self.clone = None,
+            clone::CloneDecision::PickParent => {
+                let picked = rfd::FileDialog::new()
+                    .set_title(tr("Ordner für den Klon wählen"))
+                    .set_directory(&dialog.parent)
+                    .pick_folder();
+                if let Some(dir) = picked {
+                    dialog.parent = dir.display().to_string();
+                }
+            }
+            clone::CloneDecision::Done(dir) => {
+                self.clone = None;
+                let text = clone::cloned_notice(&dir);
+                self.open(dir, ctx);
+                self.pending_notice = Some(text);
             }
         }
     }
@@ -497,7 +541,7 @@ impl RepoWindow {
         }
         session.submit(Command::Identity);
         self.confirm = None;
-        self.notice = None;
+        self.notice = self.pending_notice.take().map(|text| (text, None));
         self.discarded.clear();
         self.undo.clear();
         self.undo_prompt = None;
@@ -569,7 +613,10 @@ impl RepoWindow {
             self.opening = None;
             match opened {
                 Ok((session, snapshot)) => self.show_opened(session, snapshot, ctx),
-                Err(e) => self.error = Some(error_text(&e)),
+                Err(e) => {
+                    self.pending_notice = None;
+                    self.error = Some(error_text(&e));
+                }
             }
         }
         let events = self
@@ -940,6 +987,7 @@ impl RepoWindow {
         self.confirm_dialog(&ctx);
         self.branch_dialog(&ctx);
         self.remote_dialog(&ctx);
+        self.clone_dialog(&ctx);
         self.prompt_dialog(&ctx);
         self.undo_dialog(&ctx);
         if self.show_discarded {
@@ -1501,9 +1549,16 @@ impl RepoWindow {
                     shown_path(workdir),
                     shortcut_hint(&ctx, tr("Anderes Repository öffnen"), &OPEN)
                 );
-                let repo_clicked =
-                    toolbar::caption(ui, t, tr("Repository"), &repo_name(workdir), &hint, true)
-                        .clicked();
+                let repo =
+                    toolbar::caption(ui, t, tr("Repository"), &repo_name(workdir), &hint, true);
+                let repo_clicked = repo.clicked();
+                let mut clone_clicked = false;
+                repo.context_menu(|ui| {
+                    if ui.button(tr("Repository klonen …")).clicked() {
+                        clone_clicked = true;
+                        ui.close();
+                    }
+                });
                 toolbar::caption(
                     ui,
                     t,
@@ -1516,6 +1571,9 @@ impl RepoWindow {
                 if repo_clicked {
                     self.pick_folder(&ctx);
                 }
+                if clone_clicked {
+                    self.start_clone();
+                }
             }
             let (behind, ahead) = self
                 .status()
@@ -1523,6 +1581,11 @@ impl RepoWindow {
                 .and_then(|u| u.ahead_behind)
                 .map_or((0, 0), |(a, b)| (b, a));
             let mut known: Vec<(toolbar::Icon, bool, String)> = Vec::new();
+            if self.session.is_none() {
+                for (icon, _, _) in toolbar::ACTIONS {
+                    known.push((icon, false, tr("Kein Repository geöffnet").to_owned()));
+                }
+            }
             if self.session.is_some() {
                 known.push(match self.undo.next_undo() {
                     Some(step) => (
@@ -1780,6 +1843,9 @@ impl RepoWindow {
                     ));
                     if open.clicked() {
                         self.pick_folder(&ctx);
+                    }
+                    if ui.button(tr("Klonen …")).clicked() {
+                        self.start_clone();
                     }
                 }
                 if let Some(running) = &self.running {
@@ -2765,6 +2831,9 @@ impl RepoWindow {
             if ui.button(tr("Repository öffnen …")).clicked() {
                 let ctx = ui.ctx().clone();
                 self.pick_folder(&ctx);
+            }
+            if ui.button(tr("Repository klonen …")).clicked() {
+                self.start_clone();
             }
         });
     }

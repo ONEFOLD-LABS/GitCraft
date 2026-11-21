@@ -391,6 +391,7 @@ fn texts_behind_variables_are_translated() {
         "Pull mit Rebase",
     ]);
     texts.extend(network::PHASES);
+    texts.extend(clone::CloneDialog::PROBLEMS);
     texts.extend(
         [
             gitcraft_git::UrlProblem::Empty,
@@ -1939,4 +1940,53 @@ fn render_host_key_prompt() {
         },
     });
     shot("host-key-dark", ThemePreference::Dark, w);
+}
+
+/// Cloning from the start screen: the folder name follows the URL, the clone opens with a
+/// notice that names submodules it left out.
+#[test]
+fn clone_from_the_start_screen() {
+    crate::i18n::set_language(crate::i18n::Language::German);
+    let f = fixture_with_remote();
+    fs::write(f.repo().join(".gitmodules"), "[submodule \"x\"]\n").unwrap();
+    f.commit_all("Submodul-Eintrag");
+    assert!(f.git(&["push", "-q", "origin", "main"]));
+    let mut h = harness(RepoWindow::new(f.runner(), None));
+    h.get_by_label("Repository klonen …").click();
+    settle(&mut h);
+    let up = f.tmp.path().join("up.git");
+    type_into(&mut h, "URL", up.to_str().unwrap());
+    h.run_steps(2);
+    assert_eq!(h.state().clone.as_ref().unwrap().name, "up");
+    h.state_mut().clone.as_mut().unwrap().parent = f.tmp.path().display().to_string();
+    h.run_steps(2);
+    h.get_by_label("Klonen").hover();
+    h.step();
+    h.get_by_label("Klonen").click();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while h.state().session.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "clone did not finish: {:?}",
+            h.state().error()
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut h);
+    assert!(f.tmp.path().join("up/a.txt").exists());
+    let notice = h.state().notice.clone().map(|(t, _)| t).unwrap_or_default();
+    assert!(notice.contains("Submodule"), "{notice}");
+}
+
+#[test]
+fn render_clone_dialog() {
+    let f = Fixture::new();
+    let mut w = RepoWindow::new(f.runner(), None);
+    let mut d = clone::CloneDialog::new(f.tmp.path());
+    d.url = "http://example.org/team/projekt.git".into();
+    d.name = "projekt".into();
+    d.depth = "1".into();
+    w.clone = Some(d);
+    shot("clone-light", ThemePreference::Light, w);
 }
